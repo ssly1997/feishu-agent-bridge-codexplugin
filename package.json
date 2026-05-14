@@ -1,0 +1,34 @@
+{
+  "name": "feishu-agent-bridge",
+  "version": "0.1.1",
+  "description": "Local MCP bridge for sending agent and automation notifications to Feishu.",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@8.15.9",
+  "bin": {
+    "feishu-agent-bridge": "./dist/src/index.js",
+    "feishu-agent-codex-worker": "./dist/src/codexWorkerCli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test \"dist/test/*.test.js\"",
+    "smoke": "tsc -p tsconfig.json && node scripts/mcp-smoke.mjs",
+    "smoke:plugin": "tsc -p tsconfig.json && node scripts/mcp-smoke.mjs scripts/codex-plugin-mcp.mjs",
+    "start": "node dist/src/index.js",
+    "listen": "tsc -p tsconfig.json && node dist/src/listen.js",
+    "codex:plugin:install": "node scripts/install-codex-plugin.mjs",
+    "codex:plugin:dry-run": "node scripts/install-codex-plugin.mjs --dry-run",
+    "codex:once": "tsc -p tsconfig.json && node dist/src/codexWorkerCli.js --once",
+    "codex:worker": "tsc -p tsconfig.json && node dist/src/codexWorkerCli.js --watch"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.18",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.63.1"
+  }
+}

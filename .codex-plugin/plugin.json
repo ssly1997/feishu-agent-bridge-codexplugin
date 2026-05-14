@@ -1,0 +1,42 @@
+{
+  "name": "feishu-agent-bridge",
+  "version": "0.1.1",
+  "description": "Bridge local agents and Codex CLI sessions with Feishu notifications and group commands.",
+  "author": {
+    "name": "Feishu Agent Bridge contributors"
+  },
+  "homepage": "https://open.feishu.cn/",
+  "license": "MIT",
+  "keywords": [
+    "feishu",
+    "lark",
+    "mcp",
+    "codex",
+    "agent",
+    "notifications"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Feishu Agent Bridge",
+    "shortDescription": "Send Agent results to Feishu and continue Codex work from Feishu group commands.",
+    "longDescription": "A local MCP bridge for Feishu self-built app bots. It sends task-result cards, receives group @ commands over Feishu long connection, stores a durable local command queue, and can hand normal commands to Codex CLI resume while keeping the core bridge usable by any MCP client.",
+    "developerName": "Feishu Agent Bridge contributors",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://open.feishu.cn/",
+    "defaultPrompt": [
+      "Send the current task result to Feishu.",
+      "Start listening for Feishu group commands.",
+      "List available Codex sessions from Feishu."
+    ],
+    "brandColor": "#3370FF",
+    "composerIcon": "./assets/feishu-agent-bridge.svg",
+    "logo": "./assets/feishu-agent-bridge.svg",
+    "screenshots": []
+  }
+}

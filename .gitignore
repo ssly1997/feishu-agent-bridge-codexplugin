@@ -1,0 +1,9 @@
+node_modules/
+dist/*
+!dist/src/
+!dist/src/**
+.DS_Store
+*.log
+coverage/
+.env
+config.json
