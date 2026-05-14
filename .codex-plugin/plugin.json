@@ -1,6 +1,6 @@
 {
   "name": "feishu-agent-bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Bridge local agents and Codex CLI sessions with Feishu notifications and group commands.",
   "author": {
     "name": "Feishu Agent Bridge contributors"

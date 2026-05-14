@@ -14,7 +14,7 @@ export const DEFAULT_CONFIG = {
         requireMention: true,
         acknowledgeOnReceive: true,
         acknowledgementText: "收到，已加入 Agent 队列。",
-        pollingEnabled: true,
+        pollingEnabled: false,
         pollIntervalSeconds: 600
     },
     codex: {

@@ -83,7 +83,7 @@ cat > ~/.feishu-agent-bridge/config.json <<'JSON'
     "allowedChatIds": ["oc_xxxxxxxxxxxxxxxx"],
     "acknowledgeOnReceive": true,
     "acknowledgementText": "收到，已加入 Agent 队列。",
-    "pollingEnabled": true,
+    "pollingEnabled": false,
     "pollIntervalSeconds": 600
   },
   "codex": {
@@ -111,7 +111,7 @@ JSON
 
 `inbound.botOpenId` 和 `inbound.allowedChatIds` 都是可选项，但建议至少配置 `allowedChatIds`，避免其它群里的 @ 消息进入本地 Agent 队列。
 
-`pollingEnabled` 是长连接事件的兜底：如果飞书开放平台没有把 `im.message.receive_v1` 推到长连接，listener 会按 `pollIntervalSeconds` 拉取目标 `chat_id` 的最近消息，并用 `message_id` 去重写入同一个本地队列。
+`pollingEnabled` 默认建议保持 `false`。它只是排查长连接事件不通时的临时兜底：开启后 listener 会按 `pollIntervalSeconds` 拉取目标 `chat_id` 的最近消息。由于飞书消息列表接口可能返回最近历史消息，轮询兜底可能重新处理 `current-session`、`list-session` 这类控制消息，所以长连接已经可用时不要开启。
 
 `codex.sessionId` 是要继续的 Codex 会话 id。建议优先显式配置 session id；只有临时验证时才使用 `"useLast": true`。Codex CLI worker 继续的是同一份持久化会话历史，不保证实时注入当前打开的 Codex Desktop 窗口。
 

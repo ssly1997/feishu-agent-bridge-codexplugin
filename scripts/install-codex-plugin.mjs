@@ -22,6 +22,7 @@ const pluginCachePath = join(
 );
 const marketplacePath = join(home, ".agents", "plugins", "marketplace.json");
 const codexConfigPath = join(home, ".codex", "config.toml");
+const bridgeConfigPath = join(home, ".feishu-agent-bridge", "config.json");
 const dryRun = process.argv.includes("--dry-run");
 
 const entry = {
@@ -60,6 +61,7 @@ if (dryRun) {
         codexPluginKey: `${pluginName}@${marketplaceName}`,
         pluginCachePath,
         pluginVersion,
+        bridgeConfigPath,
         marketplaceEntry: entry,
         action: index >= 0 ? "update" : "append"
       },
@@ -84,6 +86,7 @@ console.log(`Installed ${pluginName} plugin link: ${pluginLink}`);
 console.log(`Refreshed ${pluginName} plugin cache: ${pluginCachePath}`);
 console.log(`Updated marketplace: ${marketplacePath}`);
 console.log(`Updated Codex config: ${codexConfigPath}`);
+await warnIfPollingFallbackEnabled(bridgeConfigPath);
 console.log("Restart Codex or refresh plugins after running corepack pnpm build.");
 
 async function loadPluginVersion(path) {
@@ -202,6 +205,31 @@ async function updateCodexConfig(path) {
   await mkdir(dirname(path), { recursive: true });
   const next = [text.trimEnd(), ...additions].filter(Boolean).join("\n\n") + "\n";
   await writeFile(path, next, "utf8");
+}
+
+async function warnIfPollingFallbackEnabled(path) {
+  let raw;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.warn(`[feishu-agent-bridge] Warning: ${path} is not valid JSON.`);
+    return;
+  }
+
+  if (parsed?.inbound?.pollingEnabled === true) {
+    console.warn(
+      `[feishu-agent-bridge] Warning: inbound.pollingEnabled is true in ${path}. ` +
+        "Long connection should be preferred; polling can replay recent Feishu messages. " +
+        "Set inbound.pollingEnabled to false unless you are actively debugging event delivery."
+    );
+  }
 }
 
 function escapeTomlString(value) {

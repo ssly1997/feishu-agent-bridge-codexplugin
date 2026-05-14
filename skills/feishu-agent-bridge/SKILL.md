@@ -46,13 +46,13 @@ For inbound commands, prefer:
     "botOpenId": "ou_xxx",
     "allowedChatIds": ["oc_xxx"],
     "acknowledgeOnReceive": true,
-    "pollingEnabled": true,
+    "pollingEnabled": false,
     "pollIntervalSeconds": 600
   }
 }
 ```
 
-Keep `allowedChatIds` narrow. Use polling only as a fallback once long connection is healthy.
+Keep `allowedChatIds` narrow. Keep polling disabled by default; enable it only as a temporary diagnostic fallback when long connection delivery is broken.
 
 ## Codex Session Commands
 
