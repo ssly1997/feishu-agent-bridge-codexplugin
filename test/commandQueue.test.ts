@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { promisify } from "node:util";
 import {
   ackCommand,
   enqueueCommand,
@@ -11,8 +13,11 @@ import {
   getPendingSessionIds,
   initializeCommandQueue,
   listCommands,
-  recoverInProgressCommands
+  recoverInProgressCommands,
+  updateCommandStatusMetadata
 } from "../src/commandQueue.js";
+
+const execFileAsync = promisify(execFile);
 
 test("command queue deduplicates Feishu message ids and tracks state", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-queue-"));
@@ -100,6 +105,65 @@ test("command queue migrates legacy JSON commands into SQLite", async () => {
     assert.equal(commands.length, 1);
     assert.equal(commands[0].messageId, "om_legacy");
     assert.equal(commands[0].state, "done");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("command queue adds and stores status card metadata on existing SQLite queues", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-queue-status-"));
+  const queuePath = join(dir, "commands.db");
+  try {
+    await execFileAsync("sqlite3", [
+      queuePath,
+      `
+create table commands (
+  id text primary key,
+  state text not null check (state in ('pending', 'in_progress', 'done', 'failed')),
+  text text not null,
+  raw_text text not null,
+  message_id text not null unique,
+  chat_id text not null,
+  chat_type text,
+  sender_json text not null,
+  source text not null,
+  event_id text,
+  tenant_key text,
+  created_at text,
+  received_at text not null,
+  session_id text,
+  session_title text,
+  session_cwd text,
+  session_source text,
+  session_git_branch text,
+  session_updated_at integer,
+  claimed_at text,
+  completed_at text,
+  attempts integer not null default 0,
+  result_summary text
+);
+insert into commands (
+  id, state, text, raw_text, message_id, chat_id, sender_json, source, received_at, attempts
+) values (
+  'fcmd_old', 'pending', '继续测试', '继续测试', 'om_old', 'oc_test', '{}', 'feishu',
+  '2026-05-15T00:00:00.000Z', 0
+);
+`
+    ]);
+
+    const updated = await updateCommandStatusMetadata("fcmd_old", queuePath, {
+      statusMessageId: "om_status",
+      statusUpdatedAt: "2026-05-15T01:00:00.000Z",
+      statusSummary: "排队中",
+      statusNotifyError: null
+    });
+
+    assert.equal(updated?.statusMessageId, "om_status");
+    assert.equal(updated?.statusUpdatedAt, "2026-05-15T01:00:00.000Z");
+    assert.equal(updated?.statusSummary, "排队中");
+
+    const commands = await listCommands(queuePath);
+    assert.equal(commands[0].statusMessageId, "om_status");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

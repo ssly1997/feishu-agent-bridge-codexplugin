@@ -38,6 +38,13 @@ export interface RecoverInProgressOptions {
   now?: () => number;
 }
 
+export interface CommandStatusMetadataPatch {
+  statusMessageId?: string | null;
+  statusUpdatedAt?: string | null;
+  statusNotifyError?: string | null;
+  statusSummary?: string | null;
+}
+
 export function resolveCommandQueuePath(config: BridgeConfig): string {
   return config.inbound.queueDbPath ?? DEFAULT_COMMAND_QUEUE_DB_PATH;
 }
@@ -180,6 +187,41 @@ export async function ackCommand(
   return rows[0] ? rowToCommand(rows[0]) : undefined;
 }
 
+export async function updateCommandStatusMetadata(
+  id: string,
+  queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH,
+  patch: CommandStatusMetadataPatch
+): Promise<AgentCommand | undefined> {
+  await ensureSchema(queuePath);
+  const assignments = [
+    hasOwn(patch, "statusMessageId")
+      ? `status_message_id = ${sqlValue(patch.statusMessageId)}`
+      : undefined,
+    hasOwn(patch, "statusUpdatedAt")
+      ? `status_updated_at = ${sqlValue(patch.statusUpdatedAt)}`
+      : undefined,
+    hasOwn(patch, "statusNotifyError")
+      ? `status_notify_error = ${sqlValue(patch.statusNotifyError)}`
+      : undefined,
+    hasOwn(patch, "statusSummary")
+      ? `status_summary = ${sqlValue(patch.statusSummary)}`
+      : undefined
+  ].filter((item): item is string => Boolean(item));
+
+  if (assignments.length === 0) {
+    return findCommandById(queuePath, id);
+  }
+
+  const rows = await sqliteJson<CommandRow>(
+    queuePath,
+    `update commands
+     set ${assignments.join(",\n         ")}
+     where id = ${sqlValue(id)}
+     returning *;`
+  );
+  return rows[0] ? rowToCommand(rows[0]) : undefined;
+}
+
 export async function getCommandQueueStats(
   queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH
 ): Promise<CommandQueueStats> {
@@ -303,7 +345,8 @@ async function insertCommand(queuePath: string, command: AgentCommand): Promise<
       id, state, text, raw_text, message_id, chat_id, chat_type, sender_json, source,
       event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
       session_source, session_git_branch, session_updated_at, claimed_at, completed_at,
-      attempts, result_summary
+      attempts, result_summary, status_message_id, status_updated_at, status_notify_error,
+      status_summary
     ) values (
       ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
       ${sqlValue(command.rawText)}, ${sqlValue(command.messageId)}, ${sqlValue(command.chatId)},
@@ -313,9 +356,22 @@ async function insertCommand(queuePath: string, command: AgentCommand): Promise<
       ${sqlValue(command.sessionTitle)}, ${sqlValue(command.sessionCwd)}, ${sqlValue(command.sessionSource)},
       ${sqlValue(command.sessionGitBranch)}, ${sqlNumber(command.sessionUpdatedAt)},
       ${sqlValue(command.claimedAt)}, ${sqlValue(command.completedAt)}, ${command.attempts},
-      ${sqlValue(command.resultSummary)}
+      ${sqlValue(command.resultSummary)}, ${sqlValue(command.statusMessageId)},
+      ${sqlValue(command.statusUpdatedAt)}, ${sqlValue(command.statusNotifyError)},
+      ${sqlValue(command.statusSummary)}
     );`
   );
+}
+
+async function findCommandById(
+  queuePath: string,
+  id: string
+): Promise<AgentCommand | undefined> {
+  const rows = await sqliteJson<CommandRow>(
+    queuePath,
+    `select * from commands where id = ${sqlValue(id)} limit 1;`
+  );
+  return rows[0] ? rowToCommand(rows[0]) : undefined;
 }
 
 async function findCommandByMessageId(
@@ -357,13 +413,36 @@ async function ensureSchema(queuePath: string): Promise<void> {
        claimed_at text,
        completed_at text,
        attempts integer not null default 0,
-       result_summary text
+       result_summary text,
+       status_message_id text,
+       status_updated_at text,
+       status_notify_error text,
+       status_summary text
      );
      create index if not exists commands_state_session_idx
        on commands(state, session_id, received_at, id);
      create index if not exists commands_session_idx
        on commands(session_id, received_at, id);`
   );
+  await ensureCommandStatusColumns(queuePath);
+}
+
+async function ensureCommandStatusColumns(queuePath: string): Promise<void> {
+  const columns = await sqliteJson<{ name: string }>(queuePath, "pragma table_info(commands);");
+  const existing = new Set(columns.map((column) => column.name));
+  const missing = [
+    ["status_message_id", "text"],
+    ["status_updated_at", "text"],
+    ["status_notify_error", "text"],
+    ["status_summary", "text"]
+  ].filter(([name]) => !existing.has(name));
+  for (const [name, type] of missing) {
+    try {
+      await sqliteExec(queuePath, `alter table commands add column ${name} ${type};`);
+    } catch (error) {
+      if (!isDuplicateColumnError(error)) throw error;
+    }
+  }
 }
 
 async function sqliteExec(queuePath: string, sql: string): Promise<void> {
@@ -429,7 +508,11 @@ function rowToCommand(row: CommandRow): AgentCommand {
     claimedAt: row.claimed_at ?? undefined,
     completedAt: row.completed_at ?? undefined,
     attempts: row.attempts,
-    resultSummary: row.result_summary ?? undefined
+    resultSummary: row.result_summary ?? undefined,
+    statusMessageId: row.status_message_id ?? undefined,
+    statusUpdatedAt: row.status_updated_at ?? undefined,
+    statusNotifyError: row.status_notify_error ?? undefined,
+    statusSummary: row.status_summary ?? undefined
   };
 }
 
@@ -468,7 +551,11 @@ function normalizeLegacyCommand(value: unknown): AgentCommand | undefined {
     claimedAt: stringValue(value.claimedAt),
     completedAt: stringValue(value.completedAt),
     attempts: numberValue(value.attempts) ?? 0,
-    resultSummary: stringValue(value.resultSummary)
+    resultSummary: stringValue(value.resultSummary),
+    statusMessageId: stringValue(value.statusMessageId),
+    statusUpdatedAt: stringValue(value.statusUpdatedAt),
+    statusNotifyError: stringValue(value.statusNotifyError),
+    statusSummary: stringValue(value.statusSummary)
   };
 }
 
@@ -508,12 +595,20 @@ function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  return error instanceof Error && /duplicate column name/i.test(error.message);
 }
 
 interface CommandRow {
@@ -540,6 +635,10 @@ interface CommandRow {
   completed_at: string | null;
   attempts: number;
   result_summary: string | null;
+  status_message_id: string | null;
+  status_updated_at: string | null;
+  status_notify_error: string | null;
+  status_summary: string | null;
 }
 
 interface CountRow {

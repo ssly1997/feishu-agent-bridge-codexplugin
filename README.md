@@ -119,6 +119,8 @@ JSON
 
 `inbound.queueDbPath` 是新的 SQLite 队列文件，默认是 `~/.feishu-agent-bridge/commands.db`。`inbound.queuePath` 只作为旧版 `commands.json` 迁移来源保留；runtime 首次启动会导入旧历史，但之后不再写 JSON queue。
 
+`inbound.acknowledgeOnReceive=true` 时，普通指令入队后会优先发送一张飞书状态卡，并在任务认领、执行中公开进展、完成或失败时更新同一张卡；如果状态卡发送或更新失败，会退回文本 ACK 或现有结果卡片。
+
 `codex.sessionId` 是当前要介入的 Codex 会话 id。普通飞书指令入队时会把当时的 `sessionId`、`sessionTitle`、`cwd` 等信息固化到任务里；后续即使全局配置切到其它 session，已入队任务仍归属原 session。`fab-runtime` 不使用 `"useLast": true` 做多会话调度。
 
 如果还没有选定会话，可以先在飞书群里发送 `@机器人 list-session`。这是 listener 直接处理的控制命令，不会进入 Agent 任务队列；listener 会从 `codex.stateDbPath` 读取可用 Codex 会话，并返回带“介入”按钮的互动卡片。`@机器人 current-session`、`@机器人 list-session <序号>` 和 `@机器人 switch-session <序号>` 也是 listener 直处理命令，不应该回复“已加入 Agent 队列”。
@@ -233,10 +235,10 @@ pnpm runtime
 1. 用户在飞书群里 @机器人：继续执行下一步
 2. runtime 的 listener 收到 `im.message.receive_v1`
 3. runtime 把任务写入 SQLite，并固化当前 Codex session 归属
-4. runtime 唤醒该 session 的 runner
-5. 同一 session 串行执行；不同 session 可以并发执行
-6. runner 执行完成后立即取同 session 下一条 pending，直到该 session 队列为空
-7. runtime 根据 Codex CLI exit code 标记 done/failed，并把结果卡片发回飞书
+4. runtime 发送 queued 状态卡并保存飞书 `message_id`
+5. runtime 唤醒该 session 的 runner，并把状态卡更新为 in_progress
+6. 同一 session 串行执行；不同 session 可以并发执行
+7. runner 执行中低频更新公开进展摘要，完成后标记 done/failed 并更新同一张状态卡
 ```
 
 如果没有选定 Codex session，普通飞书指令不会入队，runtime 会提示先发送 `list-session` 或 `switch-session <序号|sessionId>`。

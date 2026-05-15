@@ -134,6 +134,10 @@ export interface AgentCommand {
   completedAt?: string;
   attempts: number;
   resultSummary?: string;
+  statusMessageId?: string;
+  statusUpdatedAt?: string;
+  statusNotifyError?: string;
+  statusSummary?: string;
 }
 
 export interface NewAgentCommand {

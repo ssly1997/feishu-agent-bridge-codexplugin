@@ -15,6 +15,7 @@ import type { BridgeConfig, ReceiveIdType } from "../src/types.js";
 const execFileAsync = promisify(execFile);
 
 class FakeFeishuClient extends FeishuClient {
+  failInteractive = false;
   texts: Array<{
     config: BridgeConfig;
     receiver: { receiveIdType: ReceiveIdType; receiveId: string };
@@ -40,6 +41,9 @@ class FakeFeishuClient extends FeishuClient {
     receiver: { receiveIdType: ReceiveIdType; receiveId: string },
     card: unknown
   ): Promise<{ messageId?: string }> {
+    if (this.failInteractive) {
+      throw new Error("card send failed");
+    }
     this.cards.push({ config, receiver, card: card as Record<string, unknown> });
     return { messageId: "om_fake_card" };
   }
@@ -290,7 +294,60 @@ test("listener enqueues normal commands with an immutable Codex session snapshot
     assert.equal(commands[0].sessionId, "session_new");
     assert.equal(commands[0].sessionTitle, "最新会话");
     assert.equal(commands[0].sessionCwd, "/tmp/new");
+    assert.equal(commands[0].statusMessageId, "om_fake_card");
+    assert.match(commands[0].statusSummary ?? "", /等待 runtime 调度/);
+    assert.equal(client.cards.length, 1);
+    assert.equal(client.texts.length, 0);
     assert.equal(wokenSessionId, "session_new");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener falls back to text acknowledgement when queued status card fails", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-status-fallback-"));
+  const queuePath = join(dir, "commands.db");
+  const client = new FakeFeishuClient();
+  client.failInteractive = true;
+  const listener = new FeishuCommandListener();
+  try {
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        sessionId: "session_new",
+        sessionTitle: "最新会话",
+        cwd: "/tmp/new"
+      }
+    };
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> 继续执行下一步"
+      }),
+      mentions: [
+        {
+          key: "@_user_1",
+          id: { open_id: "ou_bot" },
+          name: "Agent"
+        }
+      ]
+    }), config, client);
+
+    const commands = await listCommands(queuePath);
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].statusMessageId, undefined);
+    assert.match(commands[0].statusNotifyError ?? "", /card send failed/);
+    assert.equal(client.texts.length, 1);
+    assert.match(client.texts[0].text, /已加入 Agent 队列/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

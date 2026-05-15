@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildCodexResumeArgs, runCodexResume } from "../src/codexCli.js";
+import { buildCodexResumeArgs, progressSummaryFromJsonLine, runCodexResume } from "../src/codexCli.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 
 test("buildCodexResumeArgs targets an explicit session id", () => {
@@ -77,4 +77,65 @@ console.log(JSON.stringify({ ok: true, args }));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("runCodexResume extracts public JSON progress without reasoning or tool arguments", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-codex-cli-progress-"));
+  const scriptPath = join(dir, "fake-codex.mjs");
+  const outputPath = join(dir, "last-message.txt");
+  const progress: string[] = [];
+  try {
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const outputPath = args[args.indexOf("-o") + 1];
+readFileSync(0, "utf8");
+console.log(JSON.stringify({ type: "response_item", payload: { type: "reasoning", summary: "internal" } }));
+console.log(JSON.stringify({ type: "response_item", payload: { type: "function_call", name: "exec_command", arguments: "{\\\\\\"cmd\\\\\\":\\\\\\"secret\\\\\\"}" } }));
+console.log(JSON.stringify({ type: "event_msg", payload: { type: "agent_message", phase: "commentary", message: "正在跑测试" } }));
+writeFileSync(outputPath, "done");
+`,
+      "utf8"
+    );
+    await chmod(scriptPath, 0o755);
+
+    const result = await runCodexResume("继续执行测试", {
+      ...DEFAULT_CONFIG.codex,
+      enabled: true,
+      command: scriptPath,
+      sessionId: "session_1",
+      timeoutMs: 5000
+    }, {
+      outputPath,
+      onProgress: (event) => progress.push(event.summary)
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(progress, ["正在调用工具：exec_command", "进展：正在跑测试"]);
+    assert.doesNotMatch(progress.join("\n"), /secret|internal/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("progressSummaryFromJsonLine ignores non-public Codex events", () => {
+  assert.equal(
+    progressSummaryFromJsonLine(JSON.stringify({ type: "function_call", name: "exec_command" })),
+    "正在调用工具：exec_command"
+  );
+  assert.equal(
+    progressSummaryFromJsonLine(JSON.stringify({
+      type: "agent_message",
+      phase: "commentary",
+      message: "继续检查"
+    })),
+    "进展：继续检查"
+  );
+  assert.equal(
+    progressSummaryFromJsonLine(JSON.stringify({ type: "response_item", payload: { type: "reasoning" } })),
+    undefined
+  );
+  assert.equal(progressSummaryFromJsonLine("not json"), undefined);
 });

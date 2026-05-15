@@ -21,12 +21,19 @@ export async function runCodexResume(prompt, config, options) {
     });
     let stdout = "";
     let stderr = "";
+    let stdoutLineBuffer = "";
     let timedOut = false;
     const maxBytes = config.outputMaxBytes;
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
         stdout = appendLimited(stdout, chunk, maxBytes);
+        stdoutLineBuffer = processProgressLines(stdoutLineBuffer + chunk, (summary) => {
+            options.onProgress?.({
+                summary,
+                receivedAtMs: options.now?.() ?? Date.now()
+            });
+        });
     });
     child.stderr.on("data", (chunk) => {
         stderr = appendLimited(stderr, chunk, maxBytes);
@@ -44,6 +51,13 @@ export async function runCodexResume(prompt, config, options) {
     }).finally(() => {
         clearTimeout(timeout);
     });
+    const trailingSummary = progressSummaryFromJsonLine(stdoutLineBuffer);
+    if (trailingSummary) {
+        options.onProgress?.({
+            summary: trailingSummary,
+            receivedAtMs: options.now?.() ?? Date.now()
+        });
+    }
     const end = options.now?.() ?? Date.now();
     const lastMessage = truncate(await readOptionalFile(options.outputPath), maxBytes);
     return {
@@ -86,6 +100,66 @@ export function buildCodexResumeArgs(config, outputPath) {
 function appendLimited(current, chunk, maxBytes) {
     return truncate(`${current}${chunk}`, maxBytes);
 }
+function processProgressLines(input, onSummary) {
+    const lines = input.split(/\r?\n/);
+    const rest = lines.pop() ?? "";
+    for (const line of lines) {
+        const summary = progressSummaryFromJsonLine(line);
+        if (summary)
+            onSummary(summary);
+    }
+    return rest;
+}
+export function progressSummaryFromJsonLine(line) {
+    const trimmed = line.trim();
+    if (!trimmed)
+        return undefined;
+    let parsed;
+    try {
+        parsed = JSON.parse(trimmed);
+    }
+    catch {
+        return undefined;
+    }
+    return progressSummaryFromEvent(parsed);
+}
+function progressSummaryFromEvent(event) {
+    if (!isRecord(event))
+        return undefined;
+    const type = stringValue(event.type);
+    const payload = isRecord(event.payload) ? event.payload : undefined;
+    if (type === "event_msg" && payload?.type === "agent_message") {
+        const summary = publicAgentMessageSummary(payload);
+        if (summary)
+            return summary;
+    }
+    if (type === "agent_message") {
+        const summary = publicAgentMessageSummary(event);
+        if (summary)
+            return summary;
+    }
+    if (type === "response_item" && payload?.type === "function_call") {
+        const name = stringValue(payload.name);
+        if (name) {
+            return `正在调用工具：${name}`;
+        }
+    }
+    if (type === "function_call") {
+        const name = stringValue(event.name);
+        if (name) {
+            return `正在调用工具：${name}`;
+        }
+    }
+    return undefined;
+}
+function publicAgentMessageSummary(event) {
+    const phase = stringValue(event.phase);
+    const message = stringValue(event.message);
+    if (phase === "commentary" && message) {
+        return truncateProgress(`进展：${message}`);
+    }
+    return undefined;
+}
 function truncate(value, maxBytes) {
     const buffer = Buffer.from(value, "utf8");
     if (buffer.byteLength <= maxBytes)
@@ -105,4 +179,13 @@ async function readOptionalFile(path) {
 }
 function isNodeError(error) {
     return error instanceof Error && "code" in error;
+}
+function truncateProgress(value) {
+    return value.length <= 500 ? value : `${value.slice(0, 485)}... [truncated]`;
+}
+function stringValue(value) {
+    return typeof value === "string" ? value : undefined;
+}
+function isRecord(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

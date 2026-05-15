@@ -54,11 +54,33 @@ export class FeishuClient {
             content: { text }
         });
     }
+    async updateInteractiveMessage(config, messageId, card) {
+        if (!messageId) {
+            throw new ConfigError("messageId must be a non-empty string");
+        }
+        assertAppCredentialsReady(config);
+        const token = await this.getTenantAccessToken(config);
+        const url = `${this.baseUrl}/im/v1/messages/${encodeURIComponent(messageId)}`;
+        const response = await this.requestJson("PATCH", url, {
+            content: JSON.stringify(card)
+        }, {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+        });
+        if (response.code !== 0) {
+            throw new FeishuApiError(`Feishu update message failed: ${response.msg || "unknown error"}`, {
+                code: response.code
+            });
+        }
+        return {
+            messageId: response.data?.message_id ?? messageId
+        };
+    }
     async sendMessage(config, input) {
         assertAppCredentialsReady(config);
         const token = await this.getTenantAccessToken(config);
         const url = `${this.baseUrl}/im/v1/messages?receive_id_type=${encodeURIComponent(input.receiveIdType)}`;
-        const response = await this.postJson(url, {
+        const response = await this.requestJson("POST", url, {
             receive_id: input.receiveId,
             msg_type: input.msgType,
             content: JSON.stringify(input.content)
@@ -99,8 +121,11 @@ export class FeishuClient {
         return response.tenant_access_token;
     }
     async postJson(url, body, headers) {
+        return this.requestJson("POST", url, body, headers);
+    }
+    async requestJson(method, url, body, headers) {
         const response = await this.fetchImpl(url, {
-            method: "POST",
+            method,
             headers,
             body: JSON.stringify(body)
         });

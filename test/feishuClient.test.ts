@@ -107,6 +107,27 @@ test("FeishuClient sends interactive messages to an explicit receiver", async ()
   assert.deepEqual(JSON.parse(body.content), { config: { wide_screen_mode: true } });
 });
 
+test("FeishuClient updates an existing interactive message", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const fetchImpl = async (url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    if (url.includes("/auth/v3/tenant_access_token/internal")) {
+      return jsonResponse({ code: 0, tenant_access_token: "tat_test", expire: 7200 });
+    }
+    return jsonResponse({ code: 0, data: { message_id: "om_card" } });
+  };
+
+  const client = new FeishuClient({ fetchImpl });
+  await client.updateInteractiveMessage(readyConfig, "om_card", { config: { update_multi: true } });
+
+  const updateCall = calls.find((call) => call.url.includes("/im/v1/messages/om_card"));
+  assert.ok(updateCall);
+  assert.equal(updateCall.init?.method, "PATCH");
+  const body = JSON.parse(String(updateCall.init?.body));
+  assert.equal(typeof body.content, "string");
+  assert.deepEqual(JSON.parse(body.content), { config: { update_multi: true } });
+});
+
 test("FeishuClient maps Feishu API errors without exposing credentials", async () => {
   const fetchImpl = async (url: string) => {
     if (url.includes("/auth/v3/tenant_access_token/internal")) {

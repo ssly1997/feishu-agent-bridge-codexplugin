@@ -99,6 +99,40 @@ export class FeishuClient {
     });
   }
 
+  async updateInteractiveMessage(
+    config: BridgeConfig,
+    messageId: string,
+    card: unknown
+  ): Promise<{ messageId?: string }> {
+    if (!messageId) {
+      throw new ConfigError("messageId must be a non-empty string");
+    }
+    assertAppCredentialsReady(config);
+    const token = await this.getTenantAccessToken(config);
+    const url = `${this.baseUrl}/im/v1/messages/${encodeURIComponent(messageId)}`;
+    const response = await this.requestJson<MessageResponse>(
+      "PATCH",
+      url,
+      {
+        content: JSON.stringify(card)
+      },
+      {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      }
+    );
+
+    if (response.code !== 0) {
+      throw new FeishuApiError(`Feishu update message failed: ${response.msg || "unknown error"}`, {
+        code: response.code
+      });
+    }
+
+    return {
+      messageId: response.data?.message_id ?? messageId
+    };
+  }
+
   private async sendMessage(
     config: BridgeConfig,
     input: {
@@ -113,7 +147,8 @@ export class FeishuClient {
     const url = `${this.baseUrl}/im/v1/messages?receive_id_type=${encodeURIComponent(
       input.receiveIdType
     )}`;
-    const response = await this.postJson<MessageResponse>(
+    const response = await this.requestJson<MessageResponse>(
+      "POST",
       url,
       {
         receive_id: input.receiveId,
@@ -174,8 +209,17 @@ export class FeishuClient {
     body: Record<string, unknown>,
     headers: Record<string, string>
   ): Promise<T> {
+    return this.requestJson("POST", url, body, headers);
+  }
+
+  private async requestJson<T>(
+    method: "POST" | "PATCH",
+    url: string,
+    body: Record<string, unknown>,
+    headers: Record<string, string>
+  ): Promise<T> {
     const response = await this.fetchImpl(url, {
-      method: "POST",
+      method,
       headers,
       body: JSON.stringify(body)
     });

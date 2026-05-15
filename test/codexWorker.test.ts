@@ -6,7 +6,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DEFAULT_CONFIG } from "../src/config.js";
-import { enqueueCommand, listCommands } from "../src/commandQueue.js";
+import { enqueueCommand, listCommands, updateCommandStatusMetadata } from "../src/commandQueue.js";
 import { buildFeishuCommandPrompt, processNextCodexCommand } from "../src/codexWorker.js";
 import { FeishuClient } from "../src/feishuClient.js";
 import type { BridgeConfig, ReceiveIdType } from "../src/types.js";
@@ -14,9 +14,15 @@ import type { BridgeConfig, ReceiveIdType } from "../src/types.js";
 const execFileAsync = promisify(execFile);
 
 class FakeFeishuClient extends FeishuClient {
+  failUpdate = false;
   sent: Array<{
     config: BridgeConfig;
     receiver: { receiveIdType: ReceiveIdType; receiveId: string };
+    card: Record<string, unknown>;
+  }> = [];
+  updated: Array<{
+    config: BridgeConfig;
+    messageId: string;
     card: Record<string, unknown>;
   }> = [];
 
@@ -27,6 +33,18 @@ class FakeFeishuClient extends FeishuClient {
   ): Promise<{ messageId?: string }> {
     this.sent.push({ config, receiver, card: card as Record<string, unknown> });
     return { messageId: "om_fake" };
+  }
+
+  override async updateInteractiveMessage(
+    config: BridgeConfig,
+    messageId: string,
+    card: unknown
+  ): Promise<{ messageId?: string }> {
+    if (this.failUpdate) {
+      throw new Error("patch failed");
+    }
+    this.updated.push({ config, messageId, card: card as Record<string, unknown> });
+    return { messageId };
   }
 }
 
@@ -128,7 +146,178 @@ test("buildFeishuCommandPrompt tells resumed Codex not to send Feishu messages i
 
   assert.match(prompt, /不要调用 feishu_notify/);
   assert.match(prompt, /外层 feishu-agent-bridge runtime 会自动/);
+  assert.match(prompt, /可公开/);
   assert.match(prompt, /回我一条消息，带代码块/);
+});
+
+test("processNextCodexCommand updates an existing status card while running and when done", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-status-"));
+  const scriptPath = join(dir, "fake-codex.mjs");
+  const configPath = join(dir, "config.json");
+  const queuePath = join(dir, "commands.db");
+  const outputDir = join(dir, "codex-output");
+  const client = new FakeFeishuClient();
+  let now = Date.parse("2026-05-15T00:00:00.000Z");
+  try {
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const outputPath = args[args.indexOf("-o") + 1];
+readFileSync(0, "utf8");
+console.log(JSON.stringify({ type: "response_item", payload: { type: "function_call", name: "exec_command", arguments: "{\\\\\\"cmd\\\\\\":\\\\\\"secret\\\\\\"}" } }));
+console.log(JSON.stringify({ type: "event_msg", payload: { type: "agent_message", phase: "commentary", message: "测试已经通过一半" } }));
+writeFileSync(outputPath, "全部完成");
+`,
+      "utf8"
+    );
+    await chmod(scriptPath, 0o755);
+
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        ...DEFAULT_CONFIG,
+        appId: "cli_test",
+        appSecret: "secret_test",
+        receiveId: "oc_test",
+        enabled: true,
+        inbound: {
+          ...DEFAULT_CONFIG.inbound,
+          enabled: true,
+          queueDbPath: queuePath
+        },
+        codex: {
+          ...DEFAULT_CONFIG.codex,
+          enabled: true,
+          command: scriptPath,
+          sessionId: "session_1",
+          outputDir,
+          timeoutMs: 5000
+        }
+      }),
+      "utf8"
+    );
+
+    const { command } = await enqueueCommand(
+      {
+        text: "继续执行测试",
+        rawText: "继续执行测试",
+        messageId: "om_status",
+        chatId: "oc_1",
+        chatType: "group",
+        sender: { openId: "ou_user" },
+        createdAt: "1710000000000",
+        sessionId: "session_1",
+        sessionTitle: "Session 1",
+        sessionCwd: dir
+      },
+      queuePath
+    );
+    await updateCommandStatusMetadata(command.id, queuePath, {
+      statusMessageId: "om_status_card"
+    });
+
+    const result = await processNextCodexCommand({
+      configPath,
+      feishuClient: client,
+      now: () => {
+        const value = now;
+        now += 61_000;
+        return value;
+      }
+    });
+
+    assert.equal(result.ackState, "done");
+    assert.equal(result.notification, "updated");
+    assert.equal(client.sent.length, 0);
+    assert.ok(client.updated.length >= 3);
+    assert.ok(client.updated.every((item) => item.messageId === "om_status_card"));
+    const cards = client.updated.map((item) => JSON.stringify(item.card)).join("\n");
+    assert.match(cards, /处理中/);
+    assert.match(cards, /正在调用工具：exec_command/);
+    assert.match(cards, /测试已经通过一半/);
+    assert.match(cards, /完成/);
+    assert.doesNotMatch(cards, /secret/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("processNextCodexCommand falls back to a result card when status card updates fail", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-status-fallback-"));
+  const scriptPath = join(dir, "fake-codex.mjs");
+  const configPath = join(dir, "config.json");
+  const queuePath = join(dir, "commands.db");
+  const client = new FakeFeishuClient();
+  client.failUpdate = true;
+  try {
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const outputPath = args[args.indexOf("-o") + 1];
+readFileSync(0, "utf8");
+writeFileSync(outputPath, "完成但状态卡更新失败");
+`,
+      "utf8"
+    );
+    await chmod(scriptPath, 0o755);
+
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        ...DEFAULT_CONFIG,
+        appId: "cli_test",
+        appSecret: "secret_test",
+        receiveId: "oc_test",
+        enabled: true,
+        inbound: {
+          ...DEFAULT_CONFIG.inbound,
+          enabled: true,
+          queueDbPath: queuePath
+        },
+        codex: {
+          ...DEFAULT_CONFIG.codex,
+          enabled: true,
+          command: scriptPath,
+          sessionId: "session_1",
+          timeoutMs: 5000
+        }
+      }),
+      "utf8"
+    );
+
+    const { command } = await enqueueCommand(
+      {
+        text: "继续执行测试",
+        rawText: "继续执行测试",
+        messageId: "om_fallback",
+        chatId: "oc_1",
+        chatType: "group",
+        sender: { openId: "ou_user" },
+        createdAt: "1710000000000",
+        sessionId: "session_1",
+        sessionTitle: "Session 1"
+      },
+      queuePath
+    );
+    await updateCommandStatusMetadata(command.id, queuePath, {
+      statusMessageId: "om_status_card"
+    });
+
+    const result = await processNextCodexCommand({ configPath, feishuClient: client });
+
+    assert.equal(result.ackState, "done");
+    assert.equal(result.notification, "sent");
+    assert.match(result.notifyError ?? "", /patch failed/);
+    assert.equal(client.sent.length, 1);
+    const commands = await listCommands(queuePath);
+    assert.match(commands[0].statusNotifyError ?? "", /patch failed/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("processNextCodexCommand handles list-session without running Codex CLI", async () => {

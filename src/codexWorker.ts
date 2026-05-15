@@ -1,14 +1,22 @@
 import { join } from "node:path";
 import { CONFIG_DIR, CONFIG_PATH, ConfigError, loadConfig } from "./config.js";
 import { buildNotificationCard } from "./card.js";
-import { ackCommand, getNextCommand, resolveCommandQueuePath } from "./commandQueue.js";
+import {
+  ackCommand,
+  getNextCommand,
+  resolveCommandQueuePath,
+  updateCommandStatusMetadata
+} from "./commandQueue.js";
 import { FeishuApiError, FeishuClient } from "./feishuClient.js";
-import { runCodexResume, type CodexResumeResult } from "./codexCli.js";
+import { runCodexResume, type CodexProgressEvent, type CodexResumeResult } from "./codexCli.js";
 import {
   handleCodexSessionControlCommand,
   parseCodexSessionControlCommand
 } from "./codexSessions.js";
+import { buildCommandStatusCard, type CommandStatusPhase } from "./statusCard.js";
 import type { AgentCommand, BridgeConfig, NotifyStatus } from "./types.js";
+
+const PROGRESS_UPDATE_INTERVAL_MS = 60_000;
 
 export interface CodexCommandProcessorOptions {
   configPath?: string;
@@ -26,7 +34,7 @@ export interface CodexCommandProcessResult {
   ackState?: "done" | "failed";
   control?: "current-session" | "list-session" | "select-session";
   summary?: string;
-  notification?: "sent" | "skipped";
+  notification?: "sent" | "updated" | "skipped";
   notifyError?: string;
 }
 
@@ -40,21 +48,23 @@ export async function processNextCodexCommand(
     queuePath
   };
 
-  const command = await getNextCommand(queuePath, {
+  const claimedCommand = await getNextCommand(queuePath, {
     claim: true,
     sessionId: options.sessionId
   });
-  if (!command) {
+  if (!claimedCommand) {
     return {
       ...base,
       processed: false,
       reason: "no pending command"
     };
   }
+  let command: AgentCommand = claimedCommand;
 
   let codex: CodexResumeResult | undefined;
   let ackState: "done" | "failed" = "failed";
   let summary = "";
+  const feishuClient = options.feishuClient ?? new FeishuClient();
   const control = parseCodexSessionControlCommand(command.text);
 
   if (control) {
@@ -72,7 +82,7 @@ export async function processNextCodexCommand(
       controlResult.title,
       controlResult.summary,
       undefined,
-      options.feishuClient ?? new FeishuClient()
+      feishuClient
     );
     return {
       ...base,
@@ -88,15 +98,26 @@ export async function processNextCodexCommand(
 
   if (!config.codex.enabled || !command.sessionId) {
     summary = "Codex CLI 未启用。请先发送 list-session 选择一个 Codex 会话，或在配置中设置 codex.enabled=true。";
-    const updatedCommand = await ackCommand(command.id, "failed", queuePath, summary);
-    const notifyResult = await notifyCommandResult(
+    command = await updateCommandStatusCard(
       config,
+      queuePath,
+      command,
+      "in_progress",
+      summary,
+      feishuClient,
+      { nowMs: options.now?.() ?? Date.now() }
+    ).then((result) => result.command);
+    const updatedCommand = await ackCommand(command.id, "failed", queuePath, summary);
+    const finalNotifyResult = await notifyFinalCommandStatus(
+      config,
+      queuePath,
       updatedCommand ?? command,
       "failed",
       "Codex CLI disabled",
       summary,
       undefined,
-      options.feishuClient ?? new FeishuClient()
+      feishuClient,
+      { nowMs: options.now?.() ?? Date.now() }
     );
     return {
       ...base,
@@ -104,31 +125,77 @@ export async function processNextCodexCommand(
       command: updatedCommand ?? command,
       ackState: "failed",
       summary,
-      notification: notifyResult.notification,
-      notifyError: notifyResult.error
+      notification: finalNotifyResult.notification,
+      notifyError: finalNotifyResult.error
     };
   }
+
+  command = await updateCommandStatusCard(
+    config,
+    queuePath,
+    command,
+    "in_progress",
+    "Codex CLI 已开始处理这条飞书指令。",
+    feishuClient,
+    { nowMs: options.now?.() ?? Date.now() }
+  ).then((result) => result.command);
+
+  const progressUpdates: Promise<void>[] = [];
+  let lastProgressSummary = "";
+  let lastProgressSentAt: number | undefined;
+  const reportProgress = (event: CodexProgressEvent) => {
+    const progressSummary = event.summary.trim();
+    if (!progressSummary || progressSummary === lastProgressSummary) return;
+    if (
+      lastProgressSentAt !== undefined &&
+      event.receivedAtMs - lastProgressSentAt < PROGRESS_UPDATE_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastProgressSummary = progressSummary;
+    lastProgressSentAt = event.receivedAtMs;
+    progressUpdates.push(
+      updateCommandStatusCard(
+        config,
+        queuePath,
+        command,
+        "in_progress",
+        progressSummary,
+        feishuClient,
+        { nowMs: event.receivedAtMs }
+      ).then((result) => {
+        command = result.command;
+      }).catch(() => {
+        // Progress card updates should never interrupt the running Codex task.
+      })
+    );
+  };
 
   try {
     codex = await runCodexResume(buildFeishuCommandPrompt(command), codexConfigForCommand(config, command), {
       outputPath: codexOutputPath(config, command),
-      now: options.now
+      now: options.now,
+      onProgress: reportProgress
     });
+    await Promise.allSettled(progressUpdates);
     ackState = codex.ok ? "done" : "failed";
     summary = summarizeCodexResult(codex);
   } catch (error) {
+    await Promise.allSettled(progressUpdates);
     summary = formatError(error);
   }
 
   const updatedCommand = await ackCommand(command.id, ackState, queuePath, summary);
-  const notifyResult = await notifyCommandResult(
+  const notifyResult = await notifyFinalCommandStatus(
     config,
+    queuePath,
     updatedCommand ?? command,
     ackState,
     ackState === "done" ? "Codex task finished" : "Codex task failed",
     summary,
     codex,
-    options.feishuClient ?? new FeishuClient()
+    feishuClient,
+    { nowMs: options.now?.() ?? Date.now() }
   );
 
   return {
@@ -169,10 +236,109 @@ export function buildFeishuCommandPrompt(command: AgentCommand): string {
     "请执行用户的原始指令，并把最终答复写在本次 Codex 回复中。",
     "不要调用 feishu_notify、feishu_notify_task_result、feishu_send_test 或其他飞书发送工具；外层 feishu-agent-bridge runtime 会自动把你的最终答复转发回飞书。",
     "如果用户要求“回消息”“发消息”或“验证飞书消息格式”，也只需要在最终答复中写出要返回的内容。",
+    "执行过程中可以输出简短、可公开、无敏感信息的进度更新；不要输出内部推理、完整命令参数、凭据或工具输出全文。",
     "",
     "用户原始指令：",
     command.text
   ].join("\n");
+}
+
+async function notifyFinalCommandStatus(
+  config: BridgeConfig,
+  queuePath: string,
+  command: AgentCommand,
+  ackState: "done" | "failed",
+  title: string,
+  summary: string,
+  codex: CodexResumeResult | undefined,
+  feishuClient: FeishuClient,
+  options: { nowMs: number }
+): Promise<{ notification: "sent" | "updated" | "skipped"; error?: string }> {
+  const phase: CommandStatusPhase = ackState === "done" ? "done" : "failed";
+  const statusUpdate = await updateCommandStatusCard(
+    config,
+    queuePath,
+    command,
+    phase,
+    summary,
+    feishuClient,
+    {
+      nowMs: options.nowMs,
+      codex
+    }
+  );
+  if (statusUpdate.notification === "updated") {
+    return { notification: "updated" };
+  }
+
+  const fallback = await notifyCommandResult(
+    config,
+    statusUpdate.command,
+    ackState,
+    title,
+    summary,
+    codex,
+    feishuClient
+  );
+  return {
+    notification: fallback.notification,
+    error: statusUpdate.error ?? fallback.error
+  };
+}
+
+async function updateCommandStatusCard(
+  config: BridgeConfig,
+  queuePath: string,
+  command: AgentCommand,
+  phase: CommandStatusPhase,
+  statusSummary: string,
+  feishuClient: FeishuClient,
+  options: { nowMs: number; codex?: CodexResumeResult }
+): Promise<{ command: AgentCommand; notification: "updated" | "skipped"; error?: string }> {
+  const statusUpdatedAt = new Date(options.nowMs).toISOString();
+  if (!command.statusMessageId || !config.enabled) {
+    const updated = await updateCommandStatusMetadata(command.id, queuePath, {
+      statusUpdatedAt,
+      statusSummary
+    });
+    return { command: updated ?? command, notification: "skipped" };
+  }
+
+  try {
+    await feishuClient.updateInteractiveMessage(
+      config,
+      command.statusMessageId,
+      buildCommandStatusCard(command, config, {
+        phase,
+        nowMs: options.nowMs,
+        progressSummary: phase === "in_progress" ? statusSummary : undefined,
+        resultSummary: phase === "done" || phase === "failed" ? statusSummary : undefined,
+        outputPath: options.codex?.outputPath,
+        durationMs: options.codex?.durationMs,
+        exitCode: options.codex?.exitCode,
+        signal: options.codex?.signal,
+        timedOut: options.codex?.timedOut
+      })
+    );
+    const updated = await updateCommandStatusMetadata(command.id, queuePath, {
+      statusUpdatedAt,
+      statusNotifyError: null,
+      statusSummary
+    });
+    return { command: updated ?? command, notification: "updated" };
+  } catch (error) {
+    const formatted = formatError(error);
+    const updated = await updateCommandStatusMetadata(command.id, queuePath, {
+      statusUpdatedAt,
+      statusNotifyError: formatted,
+      statusSummary
+    });
+    return {
+      command: updated ?? command,
+      notification: "skipped",
+      error: formatted
+    };
+  }
 }
 
 async function notifyCommandResult(

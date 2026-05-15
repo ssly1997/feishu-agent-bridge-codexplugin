@@ -108,6 +108,31 @@ export async function ackCommand(id, state, queuePath = DEFAULT_COMMAND_QUEUE_DB
      returning *;`);
     return rows[0] ? rowToCommand(rows[0]) : undefined;
 }
+export async function updateCommandStatusMetadata(id, queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH, patch) {
+    await ensureSchema(queuePath);
+    const assignments = [
+        hasOwn(patch, "statusMessageId")
+            ? `status_message_id = ${sqlValue(patch.statusMessageId)}`
+            : undefined,
+        hasOwn(patch, "statusUpdatedAt")
+            ? `status_updated_at = ${sqlValue(patch.statusUpdatedAt)}`
+            : undefined,
+        hasOwn(patch, "statusNotifyError")
+            ? `status_notify_error = ${sqlValue(patch.statusNotifyError)}`
+            : undefined,
+        hasOwn(patch, "statusSummary")
+            ? `status_summary = ${sqlValue(patch.statusSummary)}`
+            : undefined
+    ].filter((item) => Boolean(item));
+    if (assignments.length === 0) {
+        return findCommandById(queuePath, id);
+    }
+    const rows = await sqliteJson(queuePath, `update commands
+     set ${assignments.join(",\n         ")}
+     where id = ${sqlValue(id)}
+     returning *;`);
+    return rows[0] ? rowToCommand(rows[0]) : undefined;
+}
 export async function getCommandQueueStats(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH) {
     await ensureSchema(queuePath);
     const totals = await sqliteJson(queuePath, `select
@@ -206,7 +231,8 @@ async function insertCommand(queuePath, command) {
       id, state, text, raw_text, message_id, chat_id, chat_type, sender_json, source,
       event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
       session_source, session_git_branch, session_updated_at, claimed_at, completed_at,
-      attempts, result_summary
+      attempts, result_summary, status_message_id, status_updated_at, status_notify_error,
+      status_summary
     ) values (
       ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
       ${sqlValue(command.rawText)}, ${sqlValue(command.messageId)}, ${sqlValue(command.chatId)},
@@ -216,8 +242,14 @@ async function insertCommand(queuePath, command) {
       ${sqlValue(command.sessionTitle)}, ${sqlValue(command.sessionCwd)}, ${sqlValue(command.sessionSource)},
       ${sqlValue(command.sessionGitBranch)}, ${sqlNumber(command.sessionUpdatedAt)},
       ${sqlValue(command.claimedAt)}, ${sqlValue(command.completedAt)}, ${command.attempts},
-      ${sqlValue(command.resultSummary)}
+      ${sqlValue(command.resultSummary)}, ${sqlValue(command.statusMessageId)},
+      ${sqlValue(command.statusUpdatedAt)}, ${sqlValue(command.statusNotifyError)},
+      ${sqlValue(command.statusSummary)}
     );`);
+}
+async function findCommandById(queuePath, id) {
+    const rows = await sqliteJson(queuePath, `select * from commands where id = ${sqlValue(id)} limit 1;`);
+    return rows[0] ? rowToCommand(rows[0]) : undefined;
 }
 async function findCommandByMessageId(queuePath, messageId) {
     const rows = await sqliteJson(queuePath, `select * from commands where message_id = ${sqlValue(messageId)} limit 1;`);
@@ -249,12 +281,36 @@ async function ensureSchema(queuePath) {
        claimed_at text,
        completed_at text,
        attempts integer not null default 0,
-       result_summary text
+       result_summary text,
+       status_message_id text,
+       status_updated_at text,
+       status_notify_error text,
+       status_summary text
      );
      create index if not exists commands_state_session_idx
        on commands(state, session_id, received_at, id);
      create index if not exists commands_session_idx
        on commands(session_id, received_at, id);`);
+    await ensureCommandStatusColumns(queuePath);
+}
+async function ensureCommandStatusColumns(queuePath) {
+    const columns = await sqliteJson(queuePath, "pragma table_info(commands);");
+    const existing = new Set(columns.map((column) => column.name));
+    const missing = [
+        ["status_message_id", "text"],
+        ["status_updated_at", "text"],
+        ["status_notify_error", "text"],
+        ["status_summary", "text"]
+    ].filter(([name]) => !existing.has(name));
+    for (const [name, type] of missing) {
+        try {
+            await sqliteExec(queuePath, `alter table commands add column ${name} ${type};`);
+        }
+        catch (error) {
+            if (!isDuplicateColumnError(error))
+                throw error;
+        }
+    }
 }
 async function sqliteExec(queuePath, sql) {
     await execFileAsync("sqlite3", [queuePath, sql], { maxBuffer: 10 * 1024 * 1024 });
@@ -316,7 +372,11 @@ function rowToCommand(row) {
         claimedAt: row.claimed_at ?? undefined,
         completedAt: row.completed_at ?? undefined,
         attempts: row.attempts,
-        resultSummary: row.result_summary ?? undefined
+        resultSummary: row.result_summary ?? undefined,
+        statusMessageId: row.status_message_id ?? undefined,
+        statusUpdatedAt: row.status_updated_at ?? undefined,
+        statusNotifyError: row.status_notify_error ?? undefined,
+        statusSummary: row.status_summary ?? undefined
     };
 }
 function normalizeLegacyCommand(value) {
@@ -355,7 +415,11 @@ function normalizeLegacyCommand(value) {
         claimedAt: stringValue(value.claimedAt),
         completedAt: stringValue(value.completedAt),
         attempts: numberValue(value.attempts) ?? 0,
-        resultSummary: stringValue(value.resultSummary)
+        resultSummary: stringValue(value.resultSummary),
+        statusMessageId: stringValue(value.statusMessageId),
+        statusUpdatedAt: stringValue(value.statusUpdatedAt),
+        statusNotifyError: stringValue(value.statusNotifyError),
+        statusSummary: stringValue(value.statusSummary)
     };
 }
 function parseSender(value) {
@@ -389,9 +453,15 @@ function stringValue(value) {
 function numberValue(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
+function hasOwn(value, key) {
+    return Object.prototype.hasOwnProperty.call(value, key);
+}
 function isRecord(value) {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 function isNodeError(error) {
     return error instanceof Error && "code" in error;
+}
+function isDuplicateColumnError(error) {
+    return error instanceof Error && /duplicate column name/i.test(error.message);
 }

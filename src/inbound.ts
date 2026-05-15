@@ -4,7 +4,8 @@ import { assertAppCredentialsReady, ConfigError, CONFIG_PATH, loadConfig } from 
 import {
   enqueueCommand,
   getCommandQueueStats,
-  resolveCommandQueuePath
+  resolveCommandQueuePath,
+  updateCommandStatusMetadata
 } from "./commandQueue.js";
 import {
   handleCodexSessionControlCommand,
@@ -16,6 +17,7 @@ import {
   buildCodexSessionListCard,
   parseSelectSessionActionValue
 } from "./sessionCard.js";
+import { buildCommandStatusCard } from "./statusCard.js";
 import type { AgentCommand, BridgeConfig, NewAgentCommand } from "./types.js";
 
 export type MessageReceiveEvent = Parameters<
@@ -283,7 +285,7 @@ export class FeishuCommandListener {
         return;
       }
 
-      const { command, inserted } = await enqueueCommand(
+      let { command, inserted } = await enqueueCommand(
         {
           ...extracted.command,
           ...session
@@ -303,30 +305,83 @@ export class FeishuCommandListener {
       if (inserted) {
         this.enqueuedCount += 1;
         this.lastCommandAt = new Date().toISOString();
-        await this.options.onCommandEnqueued?.(command);
       }
 
       if (inserted && config.inbound.acknowledgeOnReceive) {
-        await feishuClient.sendTextMessage(
-          config,
-          {
-            receiveIdType: "chat_id",
-            receiveId: command.chatId
-          },
-          config.inbound.acknowledgementText
-        );
-        stderrLogger.info(
-          "[inbound]",
-          "sent acknowledgement",
-          JSON.stringify({
-            commandId: command.id,
-            chatId: command.chatId
-          })
-        );
+        command = await this.sendQueuedStatusCard(config, command, queuePath, feishuClient);
+      }
+
+      if (inserted) {
+        await this.options.onCommandEnqueued?.(command);
       }
     } catch (error) {
       this.lastError = formatError(error);
       stderrLogger.error("[inbound]", "failed to handle message", this.lastError);
+    }
+  }
+
+  private async sendQueuedStatusCard(
+    config: BridgeConfig,
+    command: AgentCommand,
+    queuePath: string,
+    feishuClient: FeishuClient
+  ): Promise<AgentCommand> {
+    const statusSummary = "任务已收到，正在等待 runtime 调度。";
+    const statusUpdatedAt = new Date().toISOString();
+    try {
+      const result = await feishuClient.sendInteractiveMessageToReceiver(
+        config,
+        {
+          receiveIdType: "chat_id",
+          receiveId: command.chatId
+        },
+        buildCommandStatusCard(command, config, {
+          phase: "queued",
+          progressSummary: statusSummary,
+          nowMs: Date.parse(statusUpdatedAt)
+        })
+      );
+      const updated = await updateCommandStatusMetadata(command.id, queuePath, {
+        statusMessageId: result.messageId,
+        statusUpdatedAt,
+        statusNotifyError: result.messageId ? null : "Feishu status card did not return message_id",
+        statusSummary
+      });
+      stderrLogger.info(
+        "[inbound]",
+        "sent queued status card",
+        JSON.stringify({
+          commandId: command.id,
+          chatId: command.chatId,
+          statusMessageId: result.messageId
+        })
+      );
+      return updated ?? command;
+    } catch (error) {
+      const statusNotifyError = formatError(error);
+      await updateCommandStatusMetadata(command.id, queuePath, {
+        statusUpdatedAt,
+        statusNotifyError,
+        statusSummary
+      });
+      await feishuClient.sendTextMessage(
+        config,
+        {
+          receiveIdType: "chat_id",
+          receiveId: command.chatId
+        },
+        config.inbound.acknowledgementText
+      );
+      stderrLogger.info(
+        "[inbound]",
+        "sent fallback acknowledgement",
+        JSON.stringify({
+          commandId: command.id,
+          chatId: command.chatId,
+          statusNotifyError
+        })
+      );
+      return command;
     }
   }
 
