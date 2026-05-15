@@ -12,11 +12,27 @@ export async function runCodexResume(prompt, config, options) {
     if (!prompt.trim()) {
         throw new ConfigError("prompt must be a non-empty string");
     }
-    await mkdir(dirname(options.outputPath), { recursive: true });
     const args = buildCodexResumeArgs(config, options.outputPath);
+    return runCodexProcess(prompt, config, args, options, config.cwd);
+}
+export async function runCodexNewSession(prompt, config, options) {
+    if (!config.enabled) {
+        throw new ConfigError("codex.enabled is false");
+    }
+    if (!prompt.trim()) {
+        throw new ConfigError("prompt must be a non-empty string");
+    }
+    if (!options.cwd.trim()) {
+        throw new ConfigError("new Codex session cwd is required");
+    }
+    const args = buildCodexExecArgs(config, options.outputPath, options.cwd);
+    return runCodexProcess(prompt, config, args, options, options.cwd);
+}
+async function runCodexProcess(prompt, config, args, options, cwd) {
+    await mkdir(dirname(options.outputPath), { recursive: true });
     const start = options.now?.() ?? Date.now();
     const child = spawn(config.command, args, {
-        cwd: config.cwd,
+        cwd,
         stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "";
@@ -64,7 +80,7 @@ export async function runCodexResume(prompt, config, options) {
         ok: exitCode === 0 && !timedOut,
         command: config.command,
         args,
-        cwd: config.cwd,
+        cwd,
         exitCode,
         signal,
         timedOut,
@@ -77,14 +93,7 @@ export async function runCodexResume(prompt, config, options) {
 }
 export function buildCodexResumeArgs(config, outputPath) {
     const args = ["exec"];
-    if (config.model)
-        args.push("--model", config.model);
-    if (config.profile)
-        args.push("--profile", config.profile);
-    if (config.sandbox)
-        args.push("--sandbox", config.sandbox);
-    if (config.approvalPolicy)
-        args.push("--ask-for-approval", config.approvalPolicy);
+    appendSharedCodexExecArgs(args, config);
     args.push("resume", "--json", "-o", outputPath);
     if (config.extraArgs)
         args.push(...config.extraArgs);
@@ -96,6 +105,25 @@ export function buildCodexResumeArgs(config, outputPath) {
     }
     args.push("-");
     return args;
+}
+export function buildCodexExecArgs(config, outputPath, cwd) {
+    const args = ["exec"];
+    appendSharedCodexExecArgs(args, config);
+    args.push("--cd", cwd, "--json", "-o", outputPath);
+    if (config.extraArgs)
+        args.push(...config.extraArgs);
+    args.push("-");
+    return args;
+}
+function appendSharedCodexExecArgs(args, config) {
+    if (config.model)
+        args.push("--model", config.model);
+    if (config.profile)
+        args.push("--profile", config.profile);
+    if (config.sandbox)
+        args.push("--sandbox", config.sandbox);
+    if (config.approvalPolicy)
+        args.push("--ask-for-approval", config.approvalPolicy);
 }
 function appendLimited(current, chunk, maxBytes) {
     return truncate(`${current}${chunk}`, maxBytes);

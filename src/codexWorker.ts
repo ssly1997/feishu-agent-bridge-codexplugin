@@ -32,7 +32,7 @@ export interface CodexCommandProcessResult {
   command?: AgentCommand;
   codex?: CodexResumeResult;
   ackState?: "done" | "failed";
-  control?: "current-session" | "list-session" | "select-session" | "unbind-session";
+  control?: "help" | "current-project" | "current-session" | "list-project" | "select-project" | "new-session" | "list-session" | "select-session" | "unbind-project" | "unbind-session";
   summary?: string;
   notification?: "sent" | "updated" | "skipped";
   notifyError?: string;
@@ -378,6 +378,7 @@ async function notifyCommandResult(
       status,
       summary,
       cwd: command.sessionCwd ?? config.codex.cwd,
+      projectLabel: command.projectDisplayLabel,
       codexSessionId: command.sessionId,
       codexSessionTitle: command.sessionTitle,
       artifacts: codex?.outputPath ? [codex.outputPath] : undefined,

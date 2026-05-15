@@ -55,6 +55,10 @@ const notifyProperties = {
     type: "string",
     description: "Working directory or execution context."
   },
+  projectLabel: {
+    type: "string",
+    description: "Preformatted project label for this specific notification."
+  },
   codexSessionId: {
     type: "string",
     description: "Codex session id for this specific notification."
@@ -491,6 +495,7 @@ function parseNotifyInput(
     status,
     summary,
     cwd: optionalString(value.cwd, "cwd"),
+    projectLabel: optionalString(value.projectLabel, "projectLabel"),
     codexSessionId: optionalString(value.codexSessionId, "codexSessionId"),
     codexSessionTitle: optionalString(value.codexSessionTitle, "codexSessionTitle"),
     codexSessionLabel: optionalString(value.codexSessionLabel, "codexSessionLabel"),

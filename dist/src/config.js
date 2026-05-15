@@ -19,6 +19,7 @@ export const DEFAULT_CONFIG = {
         enabled: false,
         command: "codex",
         stateDbPath: join(homedir(), ".codex", "state_5.sqlite"),
+        globalStatePath: join(homedir(), ".codex", ".codex-global-state.json"),
         useLast: false,
         extraArgs: ["--skip-git-repo-check"],
         timeoutMs: 30 * 60 * 1000,
@@ -214,6 +215,7 @@ function validateCodexConfig(config, configPath) {
         "cwd",
         "outputDir",
         "stateDbPath",
+        "globalStatePath",
         "model",
         "profile"
     ]) {
@@ -280,6 +282,7 @@ function sanitizeCodexConfig(config) {
         cwd: config.cwd,
         outputDir: config.outputDir,
         stateDbPath: config.stateDbPath,
+        globalStatePath: config.globalStatePath,
         model: config.model,
         profile: config.profile,
         sandbox: config.sandbox,

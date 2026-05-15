@@ -1,9 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildCodexResumeArgs, progressSummaryFromJsonLine, runCodexResume } from "../src/codexCli.js";
+import {
+  buildCodexExecArgs,
+  buildCodexResumeArgs,
+  progressSummaryFromJsonLine,
+  runCodexNewSession,
+  runCodexResume
+} from "../src/codexCli.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 
 test("buildCodexResumeArgs targets an explicit session id", () => {
@@ -42,6 +48,42 @@ test("buildCodexResumeArgs targets an explicit session id", () => {
   );
 });
 
+test("buildCodexExecArgs starts a new session in a cwd", () => {
+  assert.deepEqual(
+    buildCodexExecArgs(
+      {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        model: "gpt-5.2",
+        profile: "full_access",
+        sandbox: "workspace-write",
+        approvalPolicy: "never",
+        extraArgs: ["--skip-git-repo-check"]
+      },
+      "/tmp/new-last.txt",
+      "/tmp/project"
+    ),
+    [
+      "exec",
+      "--model",
+      "gpt-5.2",
+      "--profile",
+      "full_access",
+      "--sandbox",
+      "workspace-write",
+      "--ask-for-approval",
+      "never",
+      "--cd",
+      "/tmp/project",
+      "--json",
+      "-o",
+      "/tmp/new-last.txt",
+      "--skip-git-repo-check",
+      "-"
+    ]
+  );
+});
+
 test("runCodexResume writes prompt to codex exec resume and reads last message", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-codex-cli-"));
   const scriptPath = join(dir, "fake-codex.mjs");
@@ -74,6 +116,48 @@ console.log(JSON.stringify({ ok: true, args }));
     assert.match(result.stdout, /"ok":true/);
     assert.equal(result.lastMessage, "Codex saw: 继续执行测试");
     assert.deepEqual(result.args.slice(-2), ["session_1", "-"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("runCodexNewSession writes prompt to codex exec with project cwd", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-codex-cli-new-"));
+  const scriptPath = join(dir, "fake-codex.mjs");
+  const outputPath = join(dir, "last-message.txt");
+  const argsPath = join(dir, "args.json");
+  try {
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const outputPath = args[args.indexOf("-o") + 1];
+const prompt = readFileSync(0, "utf8").trim();
+writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args, cwd: process.cwd() }));
+writeFileSync(outputPath, "New session saw: " + prompt);
+`,
+      "utf8"
+    );
+    await chmod(scriptPath, 0o755);
+
+    const result = await runCodexNewSession("初始化新会话", {
+      ...DEFAULT_CONFIG.codex,
+      enabled: true,
+      command: scriptPath,
+      timeoutMs: 5000
+    }, {
+      outputPath,
+      cwd: dir
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.lastMessage, "New session saw: 初始化新会话");
+    assert.equal(result.cwd, dir);
+    const recorded = JSON.parse(await readFile(argsPath, "utf8"));
+    assert.equal(recorded.cwd, await realpath(dir));
+    assert.deepEqual(recorded.args.slice(-2), ["--skip-git-repo-check", "-"]);
+    assert.ok(recorded.args.includes("--cd"));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

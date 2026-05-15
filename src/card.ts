@@ -35,6 +35,7 @@ export function buildNotificationCard(
   const status = normalizeStatus(input.status);
   const title = truncate(input.title || config.defaultTitle, 80);
   const effectiveCwd = input.cwd || config.codex.cwd;
+  const effectiveProjectLabel = input.projectLabel || projectLabel(effectiveCwd);
   const elements: Array<Record<string, unknown>> = [];
 
   elements.push(
@@ -42,7 +43,7 @@ export function buildNotificationCard(
       [
         `**Status:** ${escapeMarkdownValue(statusLabel(status))}`,
         `**Source:** ${escapeMarkdownValue(input.source || "agent")}`,
-        `**Project:** ${escapeMarkdownValue(projectLabel(effectiveCwd))}`,
+        `**Project:** ${escapeMarkdownValue(effectiveProjectLabel)}`,
         `**Codex session:** ${escapeMarkdownValue(
           sessionLabel(input, config, options.useConfiguredCodexSession ?? true)
         )}`

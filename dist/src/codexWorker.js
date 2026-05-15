@@ -212,6 +212,7 @@ async function notifyCommandResult(config, command, ackState, title, summary, co
         status,
         summary,
         cwd: command.sessionCwd ?? config.codex.cwd,
+        projectLabel: command.projectDisplayLabel,
         codexSessionId: command.sessionId,
         codexSessionTitle: command.sessionTitle,
         artifacts: codex?.outputPath ? [codex.outputPath] : undefined,

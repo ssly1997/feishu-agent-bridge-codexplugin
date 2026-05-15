@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { CodexSession } from "./codexSessions.js";
+import { buildCodexProjectId, formatProjectDisplayLabel, type CodexSession } from "./codexSessions.js";
 import type { NewAgentCommand } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -17,6 +17,13 @@ export interface ChatSessionBinding {
   sessionSource?: string;
   sessionGitBranch?: string;
   sessionUpdatedAt?: number;
+  projectId?: string;
+  projectKind?: string;
+  projectRootPath?: string;
+  projectDisplayName?: string;
+  projectSecondaryName?: string;
+  projectDisplayLabel?: string;
+  projectLabelSource?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -70,11 +77,17 @@ export async function upsertChatSessionBinding(
     queuePath,
     `insert into chat_session_bindings (
        chat_id, chat_type, chat_name, session_id, session_title, session_cwd, session_source,
-       session_git_branch, session_updated_at, created_at, updated_at
+       session_git_branch, session_updated_at, project_id, project_kind, project_root_path,
+       project_display_name, project_secondary_name, project_display_label, project_label_source,
+       created_at, updated_at
      ) values (
        ${sqlValue(input.chatId)}, ${sqlValue(input.chatType)}, ${sqlValue(input.chatName)},
        ${sqlValue(input.session.id)}, ${sqlValue(sessionTitle)}, ${sqlValue(input.session.cwd)},
        ${sqlValue(input.session.source)}, ${sqlValue(input.session.gitBranch)}, ${sqlNumber(input.session.updatedAt)},
+       ${sqlValue(input.session.projectId)}, ${sqlValue(input.session.projectKind)},
+       ${sqlValue(input.session.projectRootPath)}, ${sqlValue(input.session.projectDisplayName)},
+       ${sqlValue(input.session.projectSecondaryName)}, ${sqlValue(input.session.projectDisplayLabel)},
+       ${sqlValue(input.session.projectLabelSource)},
        ${sqlValue(now)}, ${sqlValue(now)}
      )
      on conflict(chat_id) do update set
@@ -86,6 +99,13 @@ export async function upsertChatSessionBinding(
        session_source = excluded.session_source,
        session_git_branch = excluded.session_git_branch,
        session_updated_at = excluded.session_updated_at,
+       project_id = excluded.project_id,
+       project_kind = excluded.project_kind,
+       project_root_path = excluded.project_root_path,
+       project_display_name = excluded.project_display_name,
+       project_secondary_name = excluded.project_secondary_name,
+       project_display_label = excluded.project_display_label,
+       project_label_source = excluded.project_label_source,
        updated_at = excluded.updated_at
      returning *;`
   );
@@ -122,7 +142,9 @@ export async function updateChatSessionBindingChatName(
 
 export function bindingToCommandSession(binding: ChatSessionBinding): Pick<
   NewAgentCommand,
-  "sessionId" | "sessionTitle" | "sessionCwd" | "sessionSource" | "sessionGitBranch" | "sessionUpdatedAt"
+  "sessionId" | "sessionTitle" | "sessionCwd" | "sessionSource" | "sessionGitBranch" | "sessionUpdatedAt" |
+  "projectId" | "projectKind" | "projectRootPath" | "projectDisplayName" | "projectSecondaryName" |
+  "projectDisplayLabel" | "projectLabelSource"
 > {
   return {
     sessionId: binding.sessionId,
@@ -130,24 +152,59 @@ export function bindingToCommandSession(binding: ChatSessionBinding): Pick<
     sessionCwd: binding.sessionCwd,
     sessionSource: binding.sessionSource,
     sessionGitBranch: binding.sessionGitBranch,
-    sessionUpdatedAt: binding.sessionUpdatedAt
+    sessionUpdatedAt: binding.sessionUpdatedAt,
+    projectId: binding.projectId,
+    projectKind: binding.projectKind,
+    projectRootPath: binding.projectRootPath,
+    projectDisplayName: binding.projectDisplayName,
+    projectSecondaryName: binding.projectSecondaryName,
+    projectDisplayLabel: binding.projectDisplayLabel,
+    projectLabelSource: binding.projectLabelSource
   };
 }
 
 export function formatCurrentChatSession(binding: ChatSessionBinding | undefined): string {
   if (!binding) {
-    return "当前群没有绑定 Codex 会话。请先发送 list-session 选择一个会话。";
+    return "当前群没有绑定 Codex project。请先发送 list-project 选择一个 project。";
   }
 
   return [
-    "当前群绑定的 Codex 会话：",
+    "当前群绑定的 Codex project：",
     "",
     binding.chatName ? `chat: ${binding.chatName}` : undefined,
+    binding.projectDisplayLabel ? `project: ${binding.projectDisplayLabel}` : undefined,
+    binding.projectId ? `project id: ${binding.projectId}` : undefined,
+    binding.projectRootPath ? `project root: ${binding.projectRootPath}` : undefined,
+    "",
+    "Active session:",
     `title: ${binding.sessionTitle || "(untitled)"}`,
     `id: ${binding.sessionId}`,
     binding.sessionCwd ? `cwd: ${binding.sessionCwd}` : undefined,
     binding.sessionSource ? `source: ${binding.sessionSource}` : undefined,
     binding.sessionGitBranch ? `branch: ${binding.sessionGitBranch}` : undefined,
+    binding.sessionUpdatedAt ? `session updated: ${formatTime(binding.sessionUpdatedAt)}` : undefined,
+    `binding updated: ${binding.updatedAt}`
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+export function formatCurrentChatProject(binding: ChatSessionBinding | undefined): string {
+  if (!binding) {
+    return "当前群没有绑定 Codex project。请先发送 list-project 选择一个 project。";
+  }
+
+  return [
+    "当前群绑定的 Codex project：",
+    "",
+    binding.chatName ? `chat: ${binding.chatName}` : undefined,
+    binding.projectDisplayLabel ? `project: ${binding.projectDisplayLabel}` : undefined,
+    binding.projectId ? `project id: ${binding.projectId}` : undefined,
+    binding.projectKind ? `project kind: ${binding.projectKind}` : undefined,
+    binding.projectRootPath ? `project root: ${binding.projectRootPath}` : undefined,
+    binding.projectLabelSource ? `label source: ${binding.projectLabelSource}` : undefined,
+    "",
+    "Active session:",
+    `title: ${binding.sessionTitle || "(untitled)"}`,
+    `id: ${binding.sessionId}`,
     binding.sessionUpdatedAt ? `session updated: ${formatTime(binding.sessionUpdatedAt)}` : undefined,
     `binding updated: ${binding.updatedAt}`
   ].filter((line): line is string => line !== undefined).join("\n");
@@ -167,6 +224,13 @@ export async function ensureChatSessionBindingSchema(queuePath: string): Promise
        session_source text,
        session_git_branch text,
        session_updated_at integer,
+       project_id text,
+       project_kind text,
+       project_root_path text,
+       project_display_name text,
+       project_secondary_name text,
+       project_display_label text,
+       project_label_source text,
        created_at text not null,
        updated_at text not null
      );
@@ -174,6 +238,12 @@ export async function ensureChatSessionBindingSchema(queuePath: string): Promise
        on chat_session_bindings(session_id, updated_at);`
   );
   await ensureChatSessionBindingColumns(queuePath);
+  await backfillLegacyProjectColumns(queuePath);
+  await sqliteExec(
+    queuePath,
+    `create index if not exists chat_session_bindings_project_idx
+       on chat_session_bindings(project_id, updated_at);`
+  );
 }
 
 async function sqliteExec(queuePath: string, sql: string): Promise<void> {
@@ -189,6 +259,7 @@ async function sqliteJson<T>(queuePath: string, sql: string): Promise<T[]> {
 }
 
 function rowToBinding(row: ChatSessionBindingRow): ChatSessionBinding {
+  const legacyProject = row.project_id ? undefined : fallbackProjectFromSessionCwd(row.session_cwd);
   return {
     chatId: row.chat_id,
     chatType: row.chat_type ?? undefined,
@@ -199,6 +270,13 @@ function rowToBinding(row: ChatSessionBindingRow): ChatSessionBinding {
     sessionSource: row.session_source ?? undefined,
     sessionGitBranch: row.session_git_branch ?? undefined,
     sessionUpdatedAt: row.session_updated_at ?? undefined,
+    projectId: row.project_id ?? legacyProject?.projectId,
+    projectKind: row.project_kind ?? legacyProject?.projectKind,
+    projectRootPath: row.project_root_path ?? legacyProject?.projectRootPath,
+    projectDisplayName: row.project_display_name ?? legacyProject?.projectDisplayName,
+    projectSecondaryName: row.project_secondary_name ?? legacyProject?.projectSecondaryName,
+    projectDisplayLabel: row.project_display_label ?? legacyProject?.projectDisplayLabel,
+    projectLabelSource: row.project_label_source ?? legacyProject?.projectLabelSource,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -210,11 +288,67 @@ async function ensureChatSessionBindingColumns(queuePath: string): Promise<void>
       .map((row) => row.name)
   );
   const missing = [
-    ["chat_name", "text"]
+    ["chat_name", "text"],
+    ["project_id", "text"],
+    ["project_kind", "text"],
+    ["project_root_path", "text"],
+    ["project_display_name", "text"],
+    ["project_secondary_name", "text"],
+    ["project_display_label", "text"],
+    ["project_label_source", "text"]
   ].filter(([name]) => !existing.has(name));
   for (const [name, type] of missing) {
     await sqliteExec(queuePath, `alter table chat_session_bindings add column ${name} ${type};`);
   }
+}
+
+async function backfillLegacyProjectColumns(queuePath: string): Promise<void> {
+  const rows = await sqliteJson<{ chat_id: string; session_cwd: string | null }>(
+    queuePath,
+    `select chat_id, session_cwd
+     from chat_session_bindings
+     where project_id is null and session_cwd is not null and session_cwd <> '';`
+  );
+  for (const row of rows) {
+    const project = fallbackProjectFromSessionCwd(row.session_cwd);
+    if (!project) continue;
+    await sqliteExec(
+      queuePath,
+      `update chat_session_bindings
+       set project_id = ${sqlValue(project.projectId)},
+           project_kind = ${sqlValue(project.projectKind)},
+           project_root_path = ${sqlValue(project.projectRootPath)},
+           project_display_name = ${sqlValue(project.projectDisplayName)},
+           project_secondary_name = ${sqlValue(project.projectSecondaryName)},
+           project_display_label = ${sqlValue(project.projectDisplayLabel)},
+           project_label_source = ${sqlValue(project.projectLabelSource)}
+       where chat_id = ${sqlValue(row.chat_id)}
+         and project_id is null;`
+    );
+  }
+}
+
+function fallbackProjectFromSessionCwd(sessionCwd: string | null): {
+  projectId: string;
+  projectKind: string;
+  projectRootPath: string;
+  projectDisplayName: string;
+  projectSecondaryName: string;
+  projectDisplayLabel: string;
+  projectLabelSource: string;
+} | undefined {
+  if (!sessionCwd) return undefined;
+  const projectRootPath = resolve(sessionCwd);
+  const name = basename(projectRootPath) || projectRootPath;
+  return {
+    projectId: buildCodexProjectId("workspace", projectRootPath),
+    projectKind: "workspace",
+    projectRootPath,
+    projectDisplayName: name,
+    projectSecondaryName: name,
+    projectDisplayLabel: formatProjectDisplayLabel(name, name),
+    projectLabelSource: "legacy-cwd"
+  };
 }
 
 function positiveInteger(value: number | undefined): boolean {
@@ -244,6 +378,13 @@ interface ChatSessionBindingRow {
   session_source: string | null;
   session_git_branch: string | null;
   session_updated_at: number | null;
+  project_id: string | null;
+  project_kind: string | null;
+  project_root_path: string | null;
+  project_display_name: string | null;
+  project_secondary_name: string | null;
+  project_display_label: string | null;
+  project_label_source: string | null;
   created_at: string;
   updated_at: string;
 }

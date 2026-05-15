@@ -29,6 +29,7 @@ export function buildCommandStatusCard(command, config, options) {
         status: phaseStatus(options.phase),
         summary: lines.join("\n"),
         cwd: command.sessionCwd ?? config.codex.cwd,
+        projectLabel: command.projectDisplayLabel,
         codexSessionId: command.sessionId,
         codexSessionTitle: command.sessionTitle,
         artifacts: options.outputPath ? [options.outputPath] : undefined

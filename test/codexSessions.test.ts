@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DEFAULT_CONFIG } from "../src/config.js";
@@ -12,6 +12,7 @@ import {
   formatSelectedSession,
   formatSessionList,
   handleCodexSessionControlCommand,
+  listCodexProjects,
   listCodexSessions,
   parseCodexSessionControlCommand
 } from "../src/codexSessions.js";
@@ -59,6 +60,54 @@ test("findCodexSession supports list index and id prefix", async () => {
   }
 });
 
+test("project metadata uses workspace labels and hides temporary projects by default", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-codex-projects-"));
+  const dbPath = join(dir, "state.sqlite");
+  const globalStatePath = join(dir, "global-state.json");
+  const chatroomRoot = join(dir, "worktrees", "ca9d", "ios-client");
+  const tempRoot = join(dir, "temporary");
+  try {
+    await mkdir(chatroomRoot, { recursive: true });
+    await mkdir(tempRoot, { recursive: true });
+    await seedProjectStateDb(dbPath, {
+      chatroomRoot,
+      tempRoot
+    });
+    await writeFile(
+      globalStatePath,
+      JSON.stringify({
+        "electron-workspace-root-labels": {
+          [chatroomRoot]: "ios-client_chatroom"
+        },
+        "projectless-thread-ids": ["session_temp"]
+      }),
+      "utf8"
+    );
+
+    const config = {
+      ...DEFAULT_CONFIG.codex,
+      stateDbPath: dbPath,
+      globalStatePath,
+      sessionListLimit: 10
+    };
+    const sessions = await listCodexSessions(config, { all: true, includeTemporary: true });
+    const chatroom = sessions.find((session) => session.id === "session_chatroom");
+    const temporary = sessions.find((session) => session.id === "session_temp");
+    assert.equal(chatroom?.projectDisplayLabel, "ios-client_chatroom  ios-client");
+    assert.equal(chatroom?.projectLabelSource, "codex-global-state");
+    assert.equal(temporary?.isTemporary, true);
+    const temporarySessions = await listCodexSessions(config, { all: true, temporaryOnly: true });
+    assert.deepEqual(temporarySessions.map((session) => session.id), ["session_temp"]);
+
+    const projects = await listCodexProjects(config);
+    assert.equal(projects.length, 1);
+    assert.equal(projects[0].displayLabel, "ios-client_chatroom  ios-client");
+    assert.equal(projects[0].sessionCount, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("session formatters include selection commands", () => {
   const sessions = [
     {
@@ -72,8 +121,8 @@ test("session formatters include selection commands", () => {
     }
   ];
   const list = formatSessionList(sessions, 10);
-  assert.match(list, /list-session <序号>/);
-  assert.match(list, /switch-session <序号>/);
+  assert.match(list, /list-session <序号\|sessionId>/);
+  assert.match(list, /switch-session <序号\|sessionId>/);
   assert.match(list, /current-session/);
   assert.match(list, /unbind-session/);
   assert.match(list, /session_new/);
@@ -82,10 +131,24 @@ test("session formatters include selection commands", () => {
 
 test("parseCodexSessionControlCommand accepts singular and plural list-session", () => {
   assert.deepEqual(parseCodexSessionControlCommand("list-session"), {
-    type: "list-session"
+    type: "list-session",
+    mode: "project",
+    page: 1
   });
   assert.deepEqual(parseCodexSessionControlCommand("list-sessions"), {
-    type: "list-session"
+    type: "list-session",
+    mode: "project",
+    page: 1
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("list-session --all 2"), {
+    type: "list-session",
+    mode: "all",
+    page: 2
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("list-session --temp"), {
+    type: "list-session",
+    mode: "temp",
+    page: 1
   });
   assert.deepEqual(parseCodexSessionControlCommand("list-sessions 1"), {
     type: "select-session",
@@ -97,6 +160,9 @@ test("parseCodexSessionControlCommand recognizes current and switch aliases", ()
   assert.deepEqual(parseCodexSessionControlCommand("current-session"), {
     type: "current-session"
   });
+  assert.deepEqual(parseCodexSessionControlCommand("current-project"), {
+    type: "current-project"
+  });
   assert.deepEqual(parseCodexSessionControlCommand("session-status"), {
     type: "current-session"
   });
@@ -107,8 +173,36 @@ test("parseCodexSessionControlCommand recognizes current and switch aliases", ()
   assert.deepEqual(parseCodexSessionControlCommand("unbind-session"), {
     type: "unbind-session"
   });
+  assert.deepEqual(parseCodexSessionControlCommand("unbind-project"), {
+    type: "unbind-project"
+  });
   assert.deepEqual(parseCodexSessionControlCommand("detach-session"), {
     type: "unbind-session"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("help"), {
+    type: "help"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("list-projects"), {
+    type: "list-project",
+    page: 1
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("list-project 2"), {
+    type: "list-project",
+    page: 2
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("bind-project 2"), {
+    type: "select-project",
+    selector: "2"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("new-session"), {
+    type: "new-session"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("create-session 先了解项目结构"), {
+    type: "new-session",
+    prompt: "先了解项目结构"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("新建会话"), {
+    type: "new-session"
   });
 });
 
@@ -289,6 +383,33 @@ create table threads (
 insert into threads values ('session_old', '旧会话', '/tmp/old', 'cli', 1000, 900, 0, 'gpt-5', null, '${join(dbPath, "..", "session_old.jsonl").replaceAll("'", "''")}', '旧需求');
 insert into threads values ('session_archived', '归档会话', '/tmp/archived', 'cli', 3000, 900, 1, 'gpt-5', null, '${join(dbPath, "..", "session_archived.jsonl").replaceAll("'", "''")}', '归档需求');
 insert into threads values ('session_new', '最新会话', '/tmp/new', 'vscode', 2000, 1000, 0, 'gpt-5', 'main', '${join(dbPath, "..", "session_new.jsonl").replaceAll("'", "''")}', '新需求');
+`
+  ]);
+}
+
+async function seedProjectStateDb(
+  dbPath: string,
+  roots: { chatroomRoot: string; tempRoot: string }
+): Promise<void> {
+  await execFileAsync("sqlite3", [
+    dbPath,
+    `
+create table threads (
+  id text primary key,
+  title text not null,
+  cwd text not null,
+  source text not null,
+  updated_at integer not null,
+  created_at integer not null,
+  archived integer not null,
+  model text,
+  git_branch text,
+  git_origin_url text,
+  rollout_path text,
+  first_user_message text
+);
+insert into threads values ('session_chatroom', '聊天室需求', '${roots.chatroomRoot.replaceAll("'", "''")}', 'codex', 2000, 1000, 0, 'gpt-5', 'main', 'git@example.com:kwai/ios-client.git', '', '聊天室需求');
+insert into threads values ('session_temp', '临时问题', '${roots.tempRoot.replaceAll("'", "''")}', 'codex', 1000, 900, 0, 'gpt-5', null, null, '', '临时问题');
 `
   ]);
 }

@@ -36,6 +36,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
     enabled: false,
     command: "codex",
     stateDbPath: join(homedir(), ".codex", "state_5.sqlite"),
+    globalStatePath: join(homedir(), ".codex", ".codex-global-state.json"),
     useLast: false,
     extraArgs: ["--skip-git-repo-check"],
     timeoutMs: 30 * 60 * 1000,
@@ -261,6 +262,7 @@ function validateCodexConfig(config: CodexCliConfig, configPath: string): void {
     "cwd",
     "outputDir",
     "stateDbPath",
+    "globalStatePath",
     "model",
     "profile"
   ] as const) {
@@ -349,6 +351,7 @@ function sanitizeCodexConfig(config: CodexCliConfig): Record<string, unknown> {
     cwd: config.cwd,
     outputDir: config.outputDir,
     stateDbPath: config.stateDbPath,
+    globalStatePath: config.globalStatePath,
     model: config.model,
     profile: config.profile,
     sandbox: config.sandbox,

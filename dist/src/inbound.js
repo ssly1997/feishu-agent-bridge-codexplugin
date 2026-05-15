@@ -1,15 +1,25 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { join } from "node:path";
-import { deleteChatSessionBinding, bindingToCommandSession, formatCurrentChatSession, getChatSessionBinding, listChatSessionBindingsBySession, updateChatSessionBindingChatName, upsertChatSessionBinding } from "./chatBindings.js";
+import { setTimeout as sleep } from "node:timers/promises";
+import { deleteChatSessionBinding, bindingToCommandSession, formatCurrentChatProject, formatCurrentChatSession, getChatSessionBinding, listChatSessionBindingsBySession, updateChatSessionBindingChatName, upsertChatSessionBinding } from "./chatBindings.js";
 import { assertAppCredentialsReady, ConfigError, CONFIG_DIR, CONFIG_PATH, loadConfig } from "./config.js";
 import { enqueueCommand, getCommandQueueStats, resolveCommandQueuePath, updateCommandStatusMetadata } from "./commandQueue.js";
-import { findCodexSession, formatSelectedSessionWithSummary, listCodexSessions, parseCodexSessionControlCommand } from "./codexSessions.js";
+import { findCodexSession, findCodexProject, formatSelectedSessionWithSummary, listCodexProjects, listCodexSessions, parseCodexSessionControlCommand } from "./codexSessions.js";
+import { runCodexNewSession } from "./codexCli.js";
 import { FeishuClient } from "./feishuClient.js";
-import { buildCodexSessionListCard, parseSelectSessionActionValue } from "./sessionCard.js";
+import { buildCodexHelpCard, buildCodexProjectListCard, buildCodexSessionListCard, parseCodexCardActionValue } from "./sessionCard.js";
 import { buildCommandStatusCard } from "./statusCard.js";
 const IMAGE_CANDIDATE_TTL_MS = 5 * 60 * 1000;
 const IMAGE_CANDIDATE_MAX_PER_SENDER = 5;
 const DEFAULT_IMAGE_TASK_TEXT = "请识别并分析这张图片。";
+const SESSION_PAGE_SIZE = 10;
+const NEW_SESSION_DISCOVERY_RETRIES = 12;
+const NEW_SESSION_DISCOVERY_INTERVAL_MS = 250;
+const DEFAULT_NEW_SESSION_PROMPT = [
+    "你正在初始化一个来自飞书群聊的 Codex 新会话。",
+    "请不要调用任何飞书发送工具；外层 feishu-agent-bridge 会负责通知用户。",
+    "只需要简短回复：新会话已创建。"
+].join("\n");
 export class FeishuCommandListener {
     options;
     wsClient;
@@ -204,15 +214,15 @@ export class FeishuCommandListener {
             const session = binding ? bindingToCommandSession(binding) : undefined;
             if (!session) {
                 this.ignoredCount += 1;
-                await this.sendSessionSelectionCard(config, extracted.command, feishuClient, {
-                    title: "当前群尚未绑定 Codex 会话",
+                await this.sendProjectSelectionCard(config, extracted.command, feishuClient, {
+                    title: "当前群尚未绑定 Codex project",
                     notice: [
-                        "**当前群尚未绑定 Codex 会话，所以这条任务暂未入队。**",
+                        "**当前群尚未绑定 Codex project，所以这条任务暂未入队。**",
                         "",
-                        "请先选择一个会话绑定到当前群，绑定成功后重新发送刚才的指令。"
+                        "请先选择一个 project 绑定到当前群，绑定成功后会自动选中该 project 最近更新的 session。然后重新发送刚才的指令。"
                     ].join("\n")
                 });
-                stderrLogger.info("[inbound]", "ignored command without chat session binding", JSON.stringify({
+                stderrLogger.info("[inbound]", "ignored command without chat project binding", JSON.stringify({
                     messageId: extracted.command.messageId,
                     chatId: extracted.command.chatId
                 }));
@@ -291,8 +301,73 @@ export class FeishuCommandListener {
         }
     }
     async handleSessionControlCommand(control, command, config, queuePath, feishuClient) {
+        if (control.type === "help") {
+            const binding = await getChatSessionBinding(queuePath, command.chatId);
+            await feishuClient.sendInteractiveMessageToReceiver(config, {
+                receiveIdType: "chat_id",
+                receiveId: command.chatId
+            }, buildCodexHelpCard({
+                projectLabel: binding?.projectDisplayLabel,
+                sessionTitle: binding?.sessionTitle,
+                sessionId: binding?.sessionId,
+                isTemporary: binding?.projectKind === "temporary"
+            }));
+            this.logHandledControl("help", command);
+            return;
+        }
+        if (control.type === "list-project") {
+            await this.sendProjectSelectionCard(config, command, feishuClient, {
+                page: control.page
+            });
+            this.logHandledControl("list-project", command);
+            return;
+        }
+        if (control.type === "select-project") {
+            const summary = await this.selectProjectForChat(config, queuePath, {
+                chatId: command.chatId,
+                chatType: command.chatType
+            }, control.selector, feishuClient);
+            await feishuClient.sendTextMessage(config, {
+                receiveIdType: "chat_id",
+                receiveId: command.chatId
+            }, summary);
+            this.logHandledControl("select-project", command);
+            return;
+        }
+        if (control.type === "new-session") {
+            await this.createNewSessionForChat(config, queuePath, {
+                chatId: command.chatId,
+                chatType: command.chatType,
+                messageId: command.messageId
+            }, control.prompt, feishuClient);
+            this.logHandledControl("new-session", command);
+            return;
+        }
         if (control.type === "list-session") {
-            await this.sendSessionSelectionCard(config, command, feishuClient);
+            if (control.mode === "all" || control.mode === "temp") {
+                await this.sendSessionPage(config, command, feishuClient, {
+                    mode: control.mode,
+                    page: control.page
+                });
+                this.logHandledControl(`list-session-${control.mode}`, command);
+                return;
+            }
+            const binding = await getChatSessionBinding(queuePath, command.chatId);
+            if (!binding?.projectId) {
+                await this.sendProjectSelectionCard(config, command, feishuClient, {
+                    title: "当前群尚未绑定 Codex project",
+                    notice: "请先绑定 project。绑定后 `list-session` 只展示该 project 下的会话。"
+                });
+                this.logHandledControl("list-session-unbound", command);
+                return;
+            }
+            await this.sendSessionPage(config, command, feishuClient, {
+                mode: "project",
+                page: control.page,
+                projectId: binding.projectId,
+                projectLabel: binding.projectDisplayLabel
+            });
+            this.logHandledControl("list-session-project", command);
             return;
         }
         if (control.type === "current-session") {
@@ -310,49 +385,23 @@ export class FeishuCommandListener {
             }));
             return;
         }
-        if (control.type === "unbind-session") {
-            const binding = await deleteChatSessionBinding(queuePath, command.chatId);
-            const summary = binding
-                ? [
-                    "已解除当前群与 Codex 会话的绑定。",
-                    "",
-                    `群：${formatChatBindingLabel(binding)}`,
-                    `原会话：${binding.sessionTitle || "(untitled)"} (${shortId(binding.sessionId)})`,
-                    "",
-                    "后续普通任务会先要求重新绑定 Codex 会话。"
-                ].join("\n")
-                : "当前群没有绑定 Codex 会话，无需解绑。";
+        if (control.type === "current-project") {
+            const binding = await getChatSessionBinding(queuePath, command.chatId);
             await feishuClient.sendTextMessage(config, {
                 receiveIdType: "chat_id",
                 receiveId: command.chatId
-            }, summary);
-            stderrLogger.info("[inbound]", "handled control command", JSON.stringify({
-                control: "unbind-session",
-                status: "done",
-                title: "Chat Codex session unbound",
-                messageId: command.messageId,
-                chatId: command.chatId,
-                sessionId: binding?.sessionId
-            }));
+            }, formatCurrentChatProject(binding));
+            this.logHandledControl("current-project", command);
             return;
         }
-        const session = await findCodexSession(config.codex, control.selector);
-        if (!session) {
-            await feishuClient.sendTextMessage(config, {
-                receiveIdType: "chat_id",
-                receiveId: command.chatId
-            }, `没有找到可介入的 Codex 会话：${control.selector}\n\n请先发送 list-session 查看可用会话。`);
-            stderrLogger.info("[inbound]", "failed to select chat session", JSON.stringify({
-                messageId: command.messageId,
-                chatId: command.chatId,
-                selector: control.selector
-            }));
+        if (control.type === "unbind-project" || control.type === "unbind-session") {
+            await this.unbindProjectForChat(config, queuePath, command, feishuClient, control.type);
             return;
         }
-        const summary = await this.bindChatToSession(config, queuePath, {
+        const summary = await this.selectSessionForChat(config, queuePath, {
             chatId: command.chatId,
             chatType: command.chatType
-        }, session, feishuClient);
+        }, control.selector, feishuClient);
         await feishuClient.sendTextMessage(config, {
             receiveIdType: "chat_id",
             receiveId: command.chatId
@@ -363,19 +412,56 @@ export class FeishuCommandListener {
             title: "Chat Codex session selected",
             messageId: command.messageId,
             chatId: command.chatId,
-            sessionId: session.id
+            selector: control.selector
         }));
     }
-    async sendSessionSelectionCard(config, command, feishuClient, options = {}) {
-        const sessions = await listCodexSessions(config.codex);
+    async sendProjectSelectionCard(config, command, feishuClient, options = {}) {
+        const projects = await listCodexProjects(config.codex);
+        const page = paginate(projects, options.page ?? 1, SESSION_PAGE_SIZE);
         await feishuClient.sendInteractiveMessageToReceiver(config, {
             receiveIdType: "chat_id",
             receiveId: command.chatId
-        }, buildCodexSessionListCard(sessions, config.codex.sessionListLimit, options));
-        stderrLogger.info("[inbound]", "sent session selection card", JSON.stringify({
+        }, buildCodexProjectListCard(page.items, SESSION_PAGE_SIZE, {
+            ...options,
+            pageInfo: page.info
+        }));
+        stderrLogger.info("[inbound]", "sent project selection card", JSON.stringify({
             messageId: command.messageId,
             chatId: command.chatId,
-            sessions: sessions.length
+            page: page.info.page,
+            total: page.info.total,
+            projects: projects.length
+        }));
+    }
+    async sendSessionPage(config, command, feishuClient, options) {
+        const sessions = await listCodexSessions(config.codex, {
+            all: true,
+            includeTemporary: options.mode === "all" ? true : undefined,
+            temporaryOnly: options.mode === "temp",
+            projectId: options.projectId
+        });
+        const page = paginate(sessions, options.page, SESSION_PAGE_SIZE);
+        const title = options.mode === "temp"
+            ? "临时 Codex 对话"
+            : options.mode === "all"
+                ? "全部 Codex 会话"
+                : "当前 project 下的 Codex 会话";
+        await feishuClient.sendInteractiveMessageToReceiver(config, {
+            receiveIdType: "chat_id",
+            receiveId: command.chatId
+        }, buildCodexSessionListCard(page.items, SESSION_PAGE_SIZE, {
+            title,
+            mode: options.mode,
+            projectId: options.projectId,
+            projectLabel: options.projectLabel,
+            pageInfo: page.info
+        }));
+        stderrLogger.info("[inbound]", "sent session page card", JSON.stringify({
+            messageId: command.messageId,
+            chatId: command.chatId,
+            mode: options.mode,
+            page: page.info.page,
+            total: page.info.total
         }));
     }
     async handleCardAction(data, feishuClient) {
@@ -388,8 +474,8 @@ export class FeishuCommandListener {
             stderrLogger.info("[card]", "ignored unsupported card action");
             return;
         }
-        const sessionId = parseSelectSessionActionValue(event.action.value);
-        if (!sessionId) {
+        const action = parseCodexCardActionValue(event.action.value);
+        if (!action) {
             this.ignoredCount += 1;
             stderrLogger.info("[card]", "ignored unrelated card action", JSON.stringify({
                 messageId: event.messageId,
@@ -398,26 +484,68 @@ export class FeishuCommandListener {
             }));
             return;
         }
-        await this.completeSessionSelectionFromCard(event, sessionId, feishuClient);
+        await this.completeCardAction(event, action, feishuClient);
     }
-    async completeSessionSelectionFromCard(event, sessionId, feishuClient) {
+    async completeCardAction(event, action, feishuClient) {
         try {
             const configPath = this.options.configPath ?? CONFIG_PATH;
             const config = await loadConfig(configPath);
             const queuePath = resolveCommandQueuePath(config);
-            const session = await findCodexSession(config.codex, sessionId);
-            const summary = session
-                ? await this.bindChatToSession(config, queuePath, {
+            if (action.type === "list-session-page") {
+                const binding = action.mode === "project"
+                    ? await getChatSessionBinding(queuePath, event.chatId)
+                    : undefined;
+                await this.sendSessionPage(config, {
+                    messageId: event.messageId,
                     chatId: event.chatId
-                }, session, feishuClient)
-                : `没有找到可介入的 Codex 会话：${sessionId}\n\n请先发送 list-session 查看可用会话。`;
+                }, feishuClient, {
+                    mode: action.mode,
+                    page: action.page,
+                    projectId: action.projectId ?? binding?.projectId,
+                    projectLabel: binding?.projectDisplayLabel
+                });
+                return;
+            }
+            if (action.type === "list-project-page") {
+                await this.sendProjectSelectionCard(config, {
+                    messageId: event.messageId,
+                    chatId: event.chatId
+                }, feishuClient, {
+                    page: action.page
+                });
+                return;
+            }
+            if (action.type === "run-command") {
+                const control = parseCodexSessionControlCommand(action.command);
+                if (!control) {
+                    this.ignoredCount += 1;
+                    return;
+                }
+                await this.handleSessionControlCommand(control, {
+                    text: action.command,
+                    rawText: action.command,
+                    messageId: event.messageId,
+                    chatId: event.chatId,
+                    sender: {
+                        openId: event.operator.openId
+                    }
+                }, config, queuePath, feishuClient);
+                return;
+            }
+            const summary = action.type === "bind-project"
+                ? await this.selectProjectForChat(config, queuePath, {
+                    chatId: event.chatId
+                }, action.projectId, feishuClient)
+                : await this.selectSessionForChat(config, queuePath, {
+                    chatId: event.chatId
+                }, action.sessionId, feishuClient);
             await feishuClient.sendTextMessage(config, {
                 receiveIdType: "chat_id",
                 receiveId: event.chatId
             }, summary);
-            stderrLogger.info("[card]", "handled session selection action", JSON.stringify({
-                status: session ? "done" : "failed",
-                sessionId,
+            stderrLogger.info("[card]", "handled codex card action", JSON.stringify({
+                status: "done",
+                action: action.type,
                 messageId: event.messageId,
                 chatId: event.chatId,
                 operatorOpenId: event.operator.openId
@@ -427,6 +555,189 @@ export class FeishuCommandListener {
             this.lastError = formatError(error);
             stderrLogger.error("[card]", "failed to handle card action", this.lastError);
         }
+    }
+    async createNewSessionForChat(config, queuePath, chat, prompt, feishuClient) {
+        const binding = await getChatSessionBinding(queuePath, chat.chatId);
+        if (!binding?.projectId) {
+            await this.sendProjectSelectionCard(config, chat, feishuClient, {
+                title: "当前群尚未绑定 Codex project",
+                notice: "请先绑定 project；绑定后可发送 `new-session` 在当前 project 下开启新会话。"
+            });
+            return;
+        }
+        if (binding.projectKind === "temporary") {
+            await feishuClient.sendTextMessage(config, {
+                receiveIdType: "chat_id",
+                receiveId: chat.chatId
+            }, [
+                "当前群绑定的是临时对话，不能在 temporary 下创建新的 project 会话。",
+                "请先发送 list-project 绑定一个 Codex project。"
+            ].join("\n"));
+            return;
+        }
+        const projectRootPath = binding.projectRootPath ?? binding.sessionCwd;
+        if (!projectRootPath) {
+            await feishuClient.sendTextMessage(config, {
+                receiveIdType: "chat_id",
+                receiveId: chat.chatId
+            }, "当前群绑定缺少 project root，无法创建新 Codex 会话。请重新发送 list-project 绑定 project。");
+            return;
+        }
+        if (!config.codex.enabled) {
+            await feishuClient.sendTextMessage(config, {
+                receiveIdType: "chat_id",
+                receiveId: chat.chatId
+            }, "Codex CLI 未启用，无法创建新会话。请先在配置中设置 codex.enabled=true。");
+            return;
+        }
+        const beforeSessions = await listCodexSessions(config.codex, {
+            all: true,
+            includeTemporary: true,
+            projectId: binding.projectId
+        });
+        const beforeIds = new Set(beforeSessions.map((session) => session.id));
+        const startedAtSeconds = Math.floor(Date.now() / 1000) - 2;
+        await feishuClient.sendTextMessage(config, {
+            receiveIdType: "chat_id",
+            receiveId: chat.chatId
+        }, [
+            "正在当前 project 下创建新的 Codex 会话。",
+            binding.projectDisplayLabel ? `project: ${binding.projectDisplayLabel}` : undefined
+        ].filter((line) => line !== undefined).join("\n"));
+        const outputPath = join(config.codex.outputDir ?? join(CONFIG_DIR, "codex-output"), `new-session-${safePathSegment(chat.chatId)}-${Date.now()}.txt`);
+        const result = await runCodexNewSession(prompt?.trim() || DEFAULT_NEW_SESSION_PROMPT, config.codex, {
+            cwd: projectRootPath,
+            outputPath
+        });
+        const session = await this.findCreatedProjectSession(config, binding.projectId, beforeIds, startedAtSeconds);
+        if (!session) {
+            await feishuClient.sendTextMessage(config, {
+                receiveIdType: "chat_id",
+                receiveId: chat.chatId
+            }, [
+                result.ok ? "Codex CLI 已返回，但暂未在本地 state DB 中识别到新会话。" : "Codex CLI 创建新会话失败。",
+                summarizeCodexNewSessionResult(result),
+                "",
+                "请稍后发送 list-session 查看是否已落盘，或重试 new-session。"
+            ].join("\n"));
+            return;
+        }
+        const summary = await this.bindChatToSession(config, queuePath, chat, session, feishuClient);
+        await feishuClient.sendTextMessage(config, {
+            receiveIdType: "chat_id",
+            receiveId: chat.chatId
+        }, [
+            "已在当前 project 下创建并绑定新的 active session。",
+            "",
+            summary,
+            "",
+            summarizeCodexNewSessionResult(result)
+        ].join("\n"));
+    }
+    async findCreatedProjectSession(config, projectId, beforeIds, startedAtSeconds) {
+        for (let attempt = 0; attempt <= NEW_SESSION_DISCOVERY_RETRIES; attempt += 1) {
+            const sessions = await listCodexSessions(config.codex, {
+                all: true,
+                includeTemporary: true,
+                projectId
+            });
+            const newSession = sessions.find((session) => !beforeIds.has(session.id));
+            if (newSession)
+                return newSession;
+            const recentSession = sessions.find((session) => session.createdAt >= startedAtSeconds);
+            if (recentSession)
+                return recentSession;
+            if (attempt < NEW_SESSION_DISCOVERY_RETRIES) {
+                await sleep(NEW_SESSION_DISCOVERY_INTERVAL_MS);
+            }
+        }
+        return undefined;
+    }
+    async selectProjectForChat(config, queuePath, chat, selector, feishuClient) {
+        const project = await findCodexProject(config.codex, selector);
+        if (!project) {
+            return `没有找到可绑定的 Codex project：${selector}\n\n请先发送 list-project 查看可用 project。`;
+        }
+        return this.bindChatToProject(config, queuePath, chat, project, feishuClient);
+    }
+    async selectSessionForChat(config, queuePath, chat, selector, feishuClient) {
+        const binding = await getChatSessionBinding(queuePath, chat.chatId);
+        const scopedSession = binding?.projectId
+            ? await findCodexSession(config.codex, selector, {
+                projectId: binding.projectId,
+                includeTemporary: binding.projectKind === "temporary"
+            })
+            : undefined;
+        if (scopedSession) {
+            return this.bindChatToSession(config, queuePath, chat, scopedSession, feishuClient);
+        }
+        const globalSession = await findCodexSession(config.codex, selector, {
+            all: true,
+            includeTemporary: true
+        });
+        if (!globalSession) {
+            return `没有找到可介入的 Codex 会话：${selector}\n\n请先发送 list-session 查看可用会话。`;
+        }
+        if (!binding?.projectId) {
+            if (globalSession.isTemporary) {
+                return this.bindChatToSession(config, queuePath, chat, globalSession, feishuClient);
+            }
+            return [
+                "当前群尚未绑定 Codex project。",
+                "",
+                `会话 ${globalSession.title || "(untitled)"} 属于 project：${globalSession.projectDisplayLabel ?? "(unknown)"}`,
+                "请先发送 list-project 或 bind-project <序号|projectId> 绑定 project。"
+            ].join("\n");
+        }
+        if (globalSession.projectId !== binding.projectId) {
+            return [
+                "这个会话不属于当前群绑定的 project，已拒绝切换。",
+                "",
+                `当前 project：${binding.projectDisplayLabel ?? binding.projectId}`,
+                `目标 project：${globalSession.projectDisplayLabel ?? globalSession.projectId ?? "(unknown)"}`,
+                "",
+                "如需跨 project，请先发送 switch-project <序号|projectId>。"
+            ].join("\n");
+        }
+        return this.bindChatToSession(config, queuePath, chat, globalSession, feishuClient);
+    }
+    async bindChatToProject(config, queuePath, chat, project, feishuClient) {
+        const session = project.latestSession;
+        const summary = await this.bindChatToSession(config, queuePath, chat, session, feishuClient);
+        return [
+            "已为当前群绑定 Codex project，并自动选中最近更新的 active session。",
+            "",
+            `project: ${project.displayLabel}`,
+            `sessions: ${project.sessionCount}`,
+            "",
+            summary
+        ].join("\n");
+    }
+    async unbindProjectForChat(config, queuePath, command, feishuClient, control) {
+        const binding = await deleteChatSessionBinding(queuePath, command.chatId);
+        const summary = binding
+            ? [
+                "已解除当前群与 Codex project / session 的绑定。",
+                "",
+                `群：${formatChatBindingLabel(binding)}`,
+                binding.projectDisplayLabel ? `原 project：${binding.projectDisplayLabel}` : undefined,
+                `原 active session：${binding.sessionTitle || "(untitled)"} (${shortId(binding.sessionId)})`,
+                "",
+                "后续普通任务会先要求重新绑定 Codex project。"
+            ].filter((line) => line !== undefined).join("\n")
+            : "当前群没有绑定 Codex project，无需解绑。";
+        await feishuClient.sendTextMessage(config, {
+            receiveIdType: "chat_id",
+            receiveId: command.chatId
+        }, summary);
+        stderrLogger.info("[inbound]", "handled control command", JSON.stringify({
+            control,
+            status: "done",
+            title: "Chat Codex project unbound",
+            messageId: command.messageId,
+            chatId: command.chatId,
+            sessionId: binding?.sessionId
+        }));
     }
     async bindChatToSession(config, queuePath, chat, session, feishuClient) {
         const chatInfo = await this.getChatInfoSafely(config, chat.chatId, feishuClient);
@@ -438,8 +749,11 @@ export class FeishuCommandListener {
             session
         });
         return [
-            "已为当前群绑定 Codex 会话。",
+            session.isTemporary
+                ? "已为当前群临时介入 Codex 对话。"
+                : "已为当前群绑定 Codex project / active session。",
             chatInfo?.name ? `当前群：${chatInfo.name}` : undefined,
+            session.projectDisplayLabel ? `当前 project：${session.projectDisplayLabel}` : undefined,
             "",
             await formatSelectedSessionWithSummary(session),
             sharedNotice ? `\n${sharedNotice}` : undefined
@@ -528,6 +842,14 @@ export class FeishuCommandListener {
         }
         return attachments;
     }
+    logHandledControl(control, command) {
+        stderrLogger.info("[inbound]", "handled control command", JSON.stringify({
+            control,
+            status: "done",
+            messageId: command.messageId,
+            chatId: command.chatId
+        }));
+    }
     async loadRuntimeConfig(fallback) {
         const configPath = this.options.configPath;
         if (!configPath)
@@ -563,6 +885,23 @@ export async function getCommandListenerSnapshot(configPath = CONFIG_PATH) {
             ignoredCount: 0
         },
         queue: await getCommandQueueStats(queuePath)
+    };
+}
+function paginate(items, requestedPage, pageSize) {
+    const total = items.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(Math.max(1, requestedPage), totalPages);
+    const offset = (page - 1) * pageSize;
+    return {
+        items: items.slice(offset, offset + pageSize),
+        info: {
+            page,
+            pageSize,
+            total,
+            totalPages,
+            hasPrev: page > 1,
+            hasNext: page < totalPages
+        }
     };
 }
 export function extractCommandFromMessage(event, config) {
@@ -798,6 +1137,19 @@ function parseFeishuTimeMs(value) {
 }
 function safePathSegment(value) {
     return value.replace(/[^a-zA-Z0-9_.-]/g, "_");
+}
+function summarizeCodexNewSessionResult(result) {
+    const body = (result.lastMessage || result.stdout || result.stderr).trim();
+    const status = result.ok
+        ? `Codex CLI completed in ${result.durationMs}ms.`
+        : result.timedOut
+            ? `Codex CLI timed out after ${result.durationMs}ms.`
+            : `Codex CLI exited with code ${result.exitCode ?? "null"}${result.signal ? ` signal=${result.signal}` : ""}.`;
+    const lines = [status];
+    if (body)
+        lines.push(body);
+    lines.push(`output: ${result.outputPath}`);
+    return lines.join("\n");
 }
 function formatChatBindingLabel(binding) {
     return binding.chatName

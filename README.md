@@ -114,17 +114,17 @@ JSON
 
 `receiveIdType` 支持 `chat_id`、`open_id` 和 `email`。如果要发到群聊，需要先把应用机器人添加到目标群，然后使用该群的 `chat_id`。
 
-`inbound.botOpenId` 是可选项，但群聊开启 `requireMention` 时建议配置，用于精确识别 @ 机器人。历史配置里的 `inbound.allowedChatIds` 已废弃，不再作为运行时接入限制；机器人加入任意群且事件权限送达后，都可以通过 `list-session` 接入。
+`inbound.botOpenId` 是可选项，但群聊开启 `requireMention` 时建议配置，用于精确识别 @ 机器人。历史配置里的 `inbound.allowedChatIds` 已废弃，不再作为运行时接入限制；机器人加入任意群且事件权限送达后，都可以通过 `list-project` 接入。
 
 `inbound.queueDbPath` 是新的 SQLite 队列文件，默认是 `~/.feishu-agent-bridge/commands.db`。`inbound.queuePath` 只作为旧版 `commands.json` 迁移来源保留；runtime 首次启动会导入旧历史，但之后不再写 JSON queue。
 
 `inbound.acknowledgeOnReceive=true` 时，普通指令入队后会优先发送一张飞书状态卡，并在任务认领、执行中公开进展、完成或失败时更新同一张卡；如果状态卡发送或更新失败，会退回文本 ACK 或现有结果卡片。
 
-`codex.sessionId` 仍保留给本地通知展示和兼容旧配置。入站飞书任务不再依赖全局 `codex.sessionId`，而是按当前飞书群的绑定关系选择 Codex 会话；普通飞书指令入队时会把群绑定里的 `sessionId`、`sessionTitle`、`cwd` 等信息固化到任务里。
+`codex.sessionId` 仍保留给本地通知展示和兼容旧配置。入站飞书任务不再依赖全局 `codex.sessionId`，而是按当前飞书群的绑定关系选择 Codex project 和 active session；普通飞书指令入队时会把群绑定里的 `projectDisplayLabel`、`sessionId`、`sessionTitle`、`cwd` 等信息固化到任务里。
 
-每个飞书群需要单独绑定会话。可以先在群里发送 `@机器人 list-session`，这是 listener 直接处理的控制命令，不会进入 Agent 任务队列；listener 会从 `codex.stateDbPath` 读取可用 Codex 会话，并返回带“介入”按钮的互动卡片。`@机器人 current-session`、`@机器人 unbind-session`、`@机器人 list-session <序号>` 和 `@机器人 switch-session <序号>` 也是 listener 直处理命令，不应该回复“已加入 Agent 队列”。
+每个飞书群需要单独绑定 project。可以先在群里发送 `@机器人 list-project`，这是 listener 直接处理的控制命令，不会进入 Agent 任务队列；listener 会从 `codex.stateDbPath` 读取 Codex 会话并按 `threads.cwd` 聚合成 project，返回带“绑定项目”和翻页按钮的互动卡片。绑定 project 后会自动选择该 project 最近更新的 session 作为 active session。`@机器人 help`、`@机器人 current-project`、`@机器人 current-session`、`@机器人 unbind-project`、`@机器人 unbind-session`、`@机器人 new-session`、`@机器人 list-session`、`@机器人 list-session --all 2`、`@机器人 list-session --temp 2` 和 `@机器人 switch-session <序号|sessionId>` 也是 listener 直处理命令，不应该回复“已加入 Agent 队列”。
 
-“介入”按钮依赖飞书把互动卡片按钮事件推给本地长连接 listener。开放平台除了订阅 `im.message.receive_v1`，还需要在「回调配置」里单独订阅卡片交互回调事件 `card.action.trigger` 并发布生效。注意「事件配置」和「回调配置」是两套配置：消息事件通了，不代表卡片按钮回调已经通。如果点击按钮提示 `code: 200340`，且本地 `listener.log` 里没有 `[card]` 日志，通常说明按钮回调没有送到本地进程；可以先用 `@机器人 list-session 1` 这样的文本命令兜底介入。
+“绑定项目 / 介入”按钮依赖飞书把互动卡片按钮事件推给本地长连接 listener。开放平台除了订阅 `im.message.receive_v1`，还需要在「回调配置」里单独订阅卡片交互回调事件 `card.action.trigger` 并发布生效。注意「事件配置」和「回调配置」是两套配置：消息事件通了，不代表卡片按钮回调已经通。如果点击按钮提示 `code: 200340`，且本地 `listener.log` 里没有 `[card]` 日志，通常说明按钮回调没有送到本地进程；可以先用 `@机器人 bind-project 1` 或 `@机器人 switch-session 1` 这样的文本命令兜底。
 
 ## 长连接事件没有推送时的排查路径
 
@@ -197,7 +197,7 @@ sqlite3 ~/.feishu-agent-bridge/commands.db 'select id,state,session_id,text from
 
 通知卡片使用飞书 Card 2.0：顶部用紧凑四行展示 `Status`、`Source`、`Project` 和 `Codex session`，正文、链接、步骤和工作目录使用 V2 `markdown` 组件。`metadata` 只保留在调用入参里用于本地/客户端扩展，不默认展示给飞书用户。
 
-`Project` 优先从入参 `cwd` 推导，否则使用 `codex.cwd`；`Codex session` 优先展示 `codex.sessionTitle` 并附带短 id，例如 `会话标题 (#019e249d)`，没有标题时只展示短 id。没有显式绑定时会展示 `useLast` 或 `(unbound)`。因此 Agent 转发到飞书的结果消息应该总能看出归属项目和会话状态，但不会暴露整段 UUID。
+`Project` 优先使用入参 `projectLabel`，否则从入参 `cwd` 推导，再退回 `codex.cwd`；`Codex session` 优先展示 `codex.sessionTitle` 并附带短 id，例如 `会话标题 (#019e249d)`，没有标题时只展示短 id。没有显式绑定时会展示 `useLast` 或 `(unbound)`。因此 Agent 转发到飞书的结果消息应该总能看出归属项目和会话状态，但不会暴露整段 UUID。
 
 ## 飞书 -> Agent 指令链路
 
@@ -233,17 +233,17 @@ pnpm runtime
 ```text
 1. 用户在飞书群里 `@机器人 继续执行下一步`
 2. runtime 的 listener 收到 `im.message.receive_v1`
-3. runtime 查询当前群绑定的 Codex session；未绑定时直接返回 `list-session` 卡片，不入队
-4. runtime 把任务写入 SQLite，并固化当前群绑定的 Codex session 归属
+3. runtime 查询当前群绑定的 Codex project 和 active session；未绑定时直接返回 `list-project` 卡片，不入队
+4. runtime 把任务写入 SQLite，并固化当前群绑定的 project / session 归属
 5. runtime 发送 queued 状态卡并保存飞书 `message_id`
 6. runtime 唤醒该 session 的 runner，并把状态卡更新为 in_progress
 7. 同一 session 串行执行；不同 session 可以并发执行
 8. runner 执行中低频更新公开进展摘要，完成后标记 done/failed 并更新同一张状态卡
 ```
 
-如果当前群没有绑定 Codex session，普通飞书指令不会入队，runtime 会返回一张明确标注“当前群尚未绑定 Codex 会话 / 这条任务暂未入队”的会话列表卡片。请先用卡片按钮、`list-session <序号|sessionId>` 或 `switch-session <序号|sessionId>` 为当前群绑定，绑定成功后重新发送刚才的指令。
+如果当前群没有绑定 Codex project，普通飞书指令不会入队，runtime 会返回一张明确标注“当前群尚未绑定 Codex project / 这条任务暂未入队”的 project 列表卡片。请先用卡片按钮、`bind-project <序号|projectId>` 或 `switch-project <序号|projectId>` 为当前群绑定 project，绑定成功后重新发送刚才的指令。
 
-多个群可以绑定同一个 Codex session；runner 会按同一个 session 串行执行，避免并发写入同一个上下文。选择一个已被其它群绑定的 session 时，listener 会提示已绑定群名，并说明这些群会共享同一 Codex 上下文。如果要解除当前群绑定，可以发送 `@机器人 unbind-session`，只会影响当前群，不会解绑其它群。
+一个群默认绑定一个 Codex project，并在该 project 内维护 active session。`list-session` 只展示当前 project 下的会话；`switch-session <序号|sessionId>` 只允许切换当前 project 内的会话，跨 project 会被拒绝并提示先 `switch-project`；`new-session [初始说明]` 会在当前 project root 下新建 Codex 会话并切为 active session。多个群仍可绑定同一个 active session；runner 会按同一个 session 串行执行，避免并发写入同一个上下文。选择一个已被其它群绑定的 session 时，listener 会提示已绑定群名，并说明这些群会共享同一 Codex 上下文。如果要解除当前群绑定，可以发送 `@机器人 unbind-session`，只会影响当前群，不会解绑其它群。
 
 图片消息支持第一版轻量链路：群聊里不 @ 机器人的纯图片不会触发任务，只会作为“最近图片候选”缓存 5 分钟，并按同群同发送人隔离。随后同一个人在同一个群里发送 `@机器人 识别刚才那张图`，runtime 会自动下载最近图片作为附件入队；如果最近连续发送了多张图，未过期候选会一次性全部入队，而不是只取最后 1 张。如果没有文字指令但同条 @ 图片或最近候选图片可用，默认任务文本是 `请识别并分析这张图片。`。下载后的资源保存在 `~/.feishu-agent-bridge/resources/<chatId>/<messageId>/...`，任务状态卡会展示附件数量和文件名摘要。V1 不拉取历史消息，所以不要依赖“先发图、很久以后再 @”的历史检索。
 
@@ -287,22 +287,37 @@ pnpm codex:once
 会话选择命令由 listener 直接处理，不进入普通任务队列：
 
 ```text
+@机器人 help
+@机器人 list-project
+@机器人 list-project 2
+@机器人 current-project
+@机器人 bind-project <序号|projectId>
+@机器人 new-session [初始说明]
 @机器人 list-session
+@机器人 list-session --all 2
+@机器人 list-session --temp 2
+@机器人 switch-session <序号|sessionId>
 @机器人 current-session
+@机器人 unbind-project
 @机器人 unbind-session
 ```
 
-`list-session` 返回最近可用会话列表，每个会话都有“介入”按钮；`current-session` 返回当前已绑定的 Codex 会话；`unbind-session` 解除当前群与 Codex 会话的绑定。点击按钮后，listener 会处理 `card.action.trigger` 回调并完成会话选择。
+`help` 会返回帮助卡。无参命令会带快捷按钮；带必填参数的命令只展示说明，不提供按钮；带可选参数且无参也能执行的命令会保留按钮，并在说明里标明按钮执行的是默认无参版本。`list-project` 默认只返回可绑定 project，不展示临时对话，默认每页 10 个，支持 `list-project 2`，互动卡也会提供上一页 / 下一页按钮；每个 project 都有“绑定项目”按钮。project 的唯一标识来自 `realpath(threads.cwd)` 的稳定 hash，展示名优先使用 `~/.codex/.codex-global-state.json` 里的 `electron-workspace-root-labels`，并在需要时附加 git repo basename，例如 `ios-client_chatroom  ios-client`。
 
-选择后，listener 会把当前飞书群的 `chat_id` 和可获取到的群名绑定到所选 Codex 会话快照，并写入 `commands.db` 的 `chat_session_bindings` 表。后续该群的普通指令才会进入 SQLite queue，并由 `fab-runtime` 继续这个 Codex 会话；其它群需要各自绑定自己的会话。同一个 Codex 会话可绑定到多个群，后续任务共享上下文并按 session 串行执行。
+绑定后，listener 会把当前飞书群的 `chat_id`、可获取到的群名、project 快照和 active session 快照写入 `commands.db` 的 `chat_session_bindings` 表。后续该群的普通指令才会进入 SQLite queue，并由 `fab-runtime` 继续这个 active session；其它群需要各自绑定自己的 project。`current-project` 返回当前群绑定的 project；`current-session` 返回当前群绑定的 project 和 active session；`unbind-project` 解除当前群的 project/session 绑定，`unbind-session` 作为兼容旧命令保留。
+
+`new-session [初始说明]` 会在当前群绑定的 project root 下启动一次新的 `codex exec`，等待 Codex 本地 state DB 落盘新 session 后，把当前群 active session 切到这个新会话。没有传初始说明时会使用一个轻量初始化 prompt；如果当前群还没绑定 project，会返回 project 选择卡，不会创建临时对话。
+
+`list-session` 在已绑定 project 时只返回当前 project 下的 session；未绑定时返回 project 选择卡。`list-session --all` 保留全局会话查看能力；`list-session --temp` 只列临时对话；二者默认每页 10 个，支持 `list-session --all 2` / `list-session --temp 2`，互动卡也会提供上一页 / 下一页按钮。临时对话来自 Codex `projectless-thread-ids`，或 `~/Documents/Codex/...` 下没有明确 workspace label 的 session，默认不进入 project 列表。
 
 如果按钮回调没有生效，通常是飞书开放平台尚未放通或发布卡片回调事件。临时备用命令仍然可用：
 
 ```text
-@机器人 list-session <序号>
-@机器人 list-session <sessionId>
-@机器人 switch-session <序号>
-@机器人 switch-session <sessionId>
+@机器人 bind-project <序号>
+@机器人 bind-project <projectId>
+@机器人 switch-project <序号>
+@机器人 switch-project <projectId>
+@机器人 switch-session <序号|sessionId>
 ```
 
 ## 通用 MCP 客户端配置
@@ -344,7 +359,7 @@ pnpm smoke
 pnpm runtime:status
 ```
 
-在任意已添加机器人的飞书群里先 `@机器人 list-session` 并选择会话，再发送 `@机器人 继续执行测试`。然后通过 MCP 调用 `feishu_command_status`，确认对应 session 的 `pending/in_progress/done/failed` 统计变化。
+在任意已添加机器人的飞书群里先 `@机器人 list-project` 并绑定 project，再发送 `@机器人 继续执行测试`。然后通过 MCP 调用 `feishu_command_status`，确认对应 session 的 `pending/in_progress/done/failed` 统计变化。
 
 `feishu_next_command` / `feishu_ack_command` 仍保留给调试和外部 Agent，但 `fab-runtime` 主路径不依赖它们。
 

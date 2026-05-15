@@ -10,6 +10,10 @@ export interface CodexResumeOptions {
   onProgress?: (event: CodexProgressEvent) => void;
 }
 
+export interface CodexNewSessionOptions extends CodexResumeOptions {
+  cwd: string;
+}
+
 export interface CodexProgressEvent {
   summary: string;
   receivedAtMs: number;
@@ -45,11 +49,40 @@ export async function runCodexResume(
     throw new ConfigError("prompt must be a non-empty string");
   }
 
-  await mkdir(dirname(options.outputPath), { recursive: true });
   const args = buildCodexResumeArgs(config, options.outputPath);
+  return runCodexProcess(prompt, config, args, options, config.cwd);
+}
+
+export async function runCodexNewSession(
+  prompt: string,
+  config: CodexCliConfig,
+  options: CodexNewSessionOptions
+): Promise<CodexResumeResult> {
+  if (!config.enabled) {
+    throw new ConfigError("codex.enabled is false");
+  }
+  if (!prompt.trim()) {
+    throw new ConfigError("prompt must be a non-empty string");
+  }
+  if (!options.cwd.trim()) {
+    throw new ConfigError("new Codex session cwd is required");
+  }
+
+  const args = buildCodexExecArgs(config, options.outputPath, options.cwd);
+  return runCodexProcess(prompt, config, args, options, options.cwd);
+}
+
+async function runCodexProcess(
+  prompt: string,
+  config: CodexCliConfig,
+  args: string[],
+  options: CodexResumeOptions,
+  cwd: string | undefined
+): Promise<CodexResumeResult> {
+  await mkdir(dirname(options.outputPath), { recursive: true });
   const start = options.now?.() ?? Date.now();
   const child = spawn(config.command, args, {
-    cwd: config.cwd,
+    cwd,
     stdio: ["pipe", "pipe", "pipe"]
   });
 
@@ -107,7 +140,7 @@ export async function runCodexResume(
     ok: exitCode === 0 && !timedOut,
     command: config.command,
     args,
-    cwd: config.cwd,
+    cwd,
     exitCode,
     signal,
     timedOut,
@@ -122,10 +155,7 @@ export async function runCodexResume(
 export function buildCodexResumeArgs(config: CodexCliConfig, outputPath: string): string[] {
   const args = ["exec"];
 
-  if (config.model) args.push("--model", config.model);
-  if (config.profile) args.push("--profile", config.profile);
-  if (config.sandbox) args.push("--sandbox", config.sandbox);
-  if (config.approvalPolicy) args.push("--ask-for-approval", config.approvalPolicy);
+  appendSharedCodexExecArgs(args, config);
 
   args.push("resume", "--json", "-o", outputPath);
 
@@ -139,6 +169,29 @@ export function buildCodexResumeArgs(config: CodexCliConfig, outputPath: string)
 
   args.push("-");
   return args;
+}
+
+export function buildCodexExecArgs(
+  config: CodexCliConfig,
+  outputPath: string,
+  cwd: string
+): string[] {
+  const args = ["exec"];
+
+  appendSharedCodexExecArgs(args, config);
+  args.push("--cd", cwd, "--json", "-o", outputPath);
+
+  if (config.extraArgs) args.push(...config.extraArgs);
+
+  args.push("-");
+  return args;
+}
+
+function appendSharedCodexExecArgs(args: string[], config: CodexCliConfig): void {
+  if (config.model) args.push("--model", config.model);
+  if (config.profile) args.push("--profile", config.profile);
+  if (config.sandbox) args.push("--sandbox", config.sandbox);
+  if (config.approvalPolicy) args.push("--ask-for-approval", config.approvalPolicy);
 }
 
 function appendLimited(current: string, chunk: string, maxBytes: number): string {

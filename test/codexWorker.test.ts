@@ -384,7 +384,7 @@ test("processNextCodexCommand handles list-session without running Codex CLI", a
     assert.equal(result.processed, true);
     assert.equal(result.control, "list-session");
     assert.equal(result.ackState, "done");
-    assert.match(result.summary ?? "", /list-session <序号>/);
+    assert.match(result.summary ?? "", /list-session <序号\|sessionId>/);
     assert.match(result.summary ?? "", /session_new/);
     assert.equal(client.sent.length, 1);
     assert.deepEqual(client.sent[0].receiver, { receiveIdType: "chat_id", receiveId: "oc_1" });

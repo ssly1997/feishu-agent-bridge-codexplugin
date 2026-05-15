@@ -54,6 +54,7 @@ export interface CodexCliConfig {
   cwd?: string;
   outputDir?: string;
   stateDbPath?: string;
+  globalStatePath?: string;
   model?: string;
   profile?: string;
   sandbox?: CodexSandboxMode;
@@ -78,6 +79,7 @@ export interface NotifyInput {
   status?: NotifyStatus | string;
   summary: string;
   cwd?: string;
+  projectLabel?: string;
   codexSessionId?: string;
   codexSessionTitle?: string;
   codexSessionLabel?: string;
@@ -141,6 +143,13 @@ export interface AgentCommand {
   sessionSource?: string;
   sessionGitBranch?: string;
   sessionUpdatedAt?: number;
+  projectId?: string;
+  projectKind?: string;
+  projectRootPath?: string;
+  projectDisplayName?: string;
+  projectSecondaryName?: string;
+  projectDisplayLabel?: string;
+  projectLabelSource?: string;
   claimedAt?: string;
   completedAt?: string;
   attempts: number;
@@ -168,5 +177,12 @@ export interface NewAgentCommand {
   sessionSource?: string;
   sessionGitBranch?: string;
   sessionUpdatedAt?: number;
+  projectId?: string;
+  projectKind?: string;
+  projectRootPath?: string;
+  projectDisplayName?: string;
+  projectSecondaryName?: string;
+  projectDisplayLabel?: string;
+  projectLabelSource?: string;
   attachments?: AgentCommandAttachment[];
 }

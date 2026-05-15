@@ -48,13 +48,22 @@ export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_DB
         sessionSource: input.sessionSource,
         sessionGitBranch: input.sessionGitBranch,
         sessionUpdatedAt: input.sessionUpdatedAt,
+        projectId: input.projectId,
+        projectKind: input.projectKind,
+        projectRootPath: input.projectRootPath,
+        projectDisplayName: input.projectDisplayName,
+        projectSecondaryName: input.projectSecondaryName,
+        projectDisplayLabel: input.projectDisplayLabel,
+        projectLabelSource: input.projectLabelSource,
         attachments: input.attachments,
         attempts: 0
     };
     await sqliteExec(queuePath, `insert into commands (
       id, state, text, raw_text, message_id, chat_id, chat_type, sender_json, source,
       event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
-      session_source, session_git_branch, session_updated_at, attachments_json, attempts
+      session_source, session_git_branch, session_updated_at, project_id, project_kind,
+      project_root_path, project_display_name, project_secondary_name, project_display_label,
+      project_label_source, attachments_json, attempts
     ) values (
       ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
       ${sqlValue(command.rawText)}, ${sqlValue(command.messageId)}, ${sqlValue(command.chatId)},
@@ -63,6 +72,9 @@ export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_DB
       ${sqlValue(command.createdAt)}, ${sqlValue(command.receivedAt)}, ${sqlValue(command.sessionId)},
       ${sqlValue(command.sessionTitle)}, ${sqlValue(command.sessionCwd)}, ${sqlValue(command.sessionSource)},
       ${sqlValue(command.sessionGitBranch)}, ${sqlNumber(command.sessionUpdatedAt)},
+      ${sqlValue(command.projectId)}, ${sqlValue(command.projectKind)}, ${sqlValue(command.projectRootPath)},
+      ${sqlValue(command.projectDisplayName)}, ${sqlValue(command.projectSecondaryName)},
+      ${sqlValue(command.projectDisplayLabel)}, ${sqlValue(command.projectLabelSource)},
       ${sqlValue(JSON.stringify(command.attachments ?? []))}, ${command.attempts}
     );`);
     return { command, inserted: true };
@@ -235,7 +247,8 @@ async function insertCommand(queuePath, command) {
       event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
       session_source, session_git_branch, session_updated_at, claimed_at, completed_at,
       attempts, result_summary, status_message_id, status_updated_at, status_notify_error,
-      status_summary, attachments_json
+      status_summary, project_id, project_kind, project_root_path, project_display_name,
+      project_secondary_name, project_display_label, project_label_source, attachments_json
     ) values (
       ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
       ${sqlValue(command.rawText)}, ${sqlValue(command.messageId)}, ${sqlValue(command.chatId)},
@@ -247,7 +260,10 @@ async function insertCommand(queuePath, command) {
       ${sqlValue(command.claimedAt)}, ${sqlValue(command.completedAt)}, ${command.attempts},
       ${sqlValue(command.resultSummary)}, ${sqlValue(command.statusMessageId)},
       ${sqlValue(command.statusUpdatedAt)}, ${sqlValue(command.statusNotifyError)},
-      ${sqlValue(command.statusSummary)}, ${sqlValue(JSON.stringify(command.attachments ?? []))}
+      ${sqlValue(command.statusSummary)}, ${sqlValue(command.projectId)}, ${sqlValue(command.projectKind)},
+      ${sqlValue(command.projectRootPath)}, ${sqlValue(command.projectDisplayName)},
+      ${sqlValue(command.projectSecondaryName)}, ${sqlValue(command.projectDisplayLabel)},
+      ${sqlValue(command.projectLabelSource)}, ${sqlValue(JSON.stringify(command.attachments ?? []))}
     );`);
 }
 async function findCommandById(queuePath, id) {
@@ -289,6 +305,13 @@ async function ensureSchema(queuePath) {
        status_updated_at text,
        status_notify_error text,
        status_summary text,
+       project_id text,
+       project_kind text,
+       project_root_path text,
+       project_display_name text,
+       project_secondary_name text,
+       project_display_label text,
+       project_label_source text,
        attachments_json text
      );
      create index if not exists commands_state_session_idx
@@ -306,6 +329,13 @@ async function ensureCommandStatusColumns(queuePath) {
         ["status_updated_at", "text"],
         ["status_notify_error", "text"],
         ["status_summary", "text"],
+        ["project_id", "text"],
+        ["project_kind", "text"],
+        ["project_root_path", "text"],
+        ["project_display_name", "text"],
+        ["project_secondary_name", "text"],
+        ["project_display_label", "text"],
+        ["project_label_source", "text"],
         ["attachments_json", "text"]
     ].filter(([name]) => !existing.has(name));
     for (const [name, type] of missing) {
@@ -375,6 +405,13 @@ function rowToCommand(row) {
         sessionSource: row.session_source ?? undefined,
         sessionGitBranch: row.session_git_branch ?? undefined,
         sessionUpdatedAt: row.session_updated_at ?? undefined,
+        projectId: row.project_id ?? undefined,
+        projectKind: row.project_kind ?? undefined,
+        projectRootPath: row.project_root_path ?? undefined,
+        projectDisplayName: row.project_display_name ?? undefined,
+        projectSecondaryName: row.project_secondary_name ?? undefined,
+        projectDisplayLabel: row.project_display_label ?? undefined,
+        projectLabelSource: row.project_label_source ?? undefined,
         claimedAt: row.claimed_at ?? undefined,
         completedAt: row.completed_at ?? undefined,
         attempts: row.attempts,
@@ -419,6 +456,13 @@ function normalizeLegacyCommand(value) {
         sessionSource: stringValue(value.sessionSource),
         sessionGitBranch: stringValue(value.sessionGitBranch),
         sessionUpdatedAt: numberValue(value.sessionUpdatedAt),
+        projectId: stringValue(value.projectId),
+        projectKind: stringValue(value.projectKind),
+        projectRootPath: stringValue(value.projectRootPath),
+        projectDisplayName: stringValue(value.projectDisplayName),
+        projectSecondaryName: stringValue(value.projectSecondaryName),
+        projectDisplayLabel: stringValue(value.projectDisplayLabel),
+        projectLabelSource: stringValue(value.projectLabelSource),
         claimedAt: stringValue(value.claimedAt),
         completedAt: stringValue(value.completedAt),
         attempts: numberValue(value.attempts) ?? 0,

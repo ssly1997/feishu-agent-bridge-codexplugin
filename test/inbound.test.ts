@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { DEFAULT_CONFIG } from "../src/config.js";
@@ -11,6 +11,7 @@ import {
   listChatSessionBindingsBySession,
   upsertChatSessionBinding
 } from "../src/chatBindings.js";
+import { listCodexProjects } from "../src/codexSessions.js";
 import { listCommands } from "../src/commandQueue.js";
 import { FeishuClient } from "../src/feishuClient.js";
 import { extractCommandFromMessage, FeishuCommandListener } from "../src/inbound.js";
@@ -277,7 +278,7 @@ test("listener handles current-session directly without enqueueing", async () =>
 
     assert.equal((await listCommands(queuePath)).length, 0);
     assert.equal(client.texts.length, 1);
-    assert.match(client.texts[0].text, /当前群没有绑定 Codex 会话/);
+    assert.match(client.texts[0].text, /当前群没有绑定 Codex project/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -426,7 +427,7 @@ test("listener falls back to text acknowledgement when queued status card fails"
   }
 });
 
-test("listener sends a session list card until the current chat selects a Codex session", async () => {
+test("listener sends a project list card until the current chat binds a Codex project", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-inbound-nosession-"));
   const queuePath = join(dir, "commands.db");
   const dbPath = join(dir, "state.sqlite");
@@ -466,9 +467,206 @@ test("listener sends a session list card until the current chat selects a Codex 
     assert.equal(client.texts.length, 0);
     assert.equal(client.cards.length, 1);
     const cardText = JSON.stringify(client.cards[0].card);
-    assert.match(cardText, /当前群尚未绑定 Codex 会话/);
+    assert.match(cardText, /当前群尚未绑定 Codex project/);
     assert.match(cardText, /这条任务暂未入队/);
     assert.match(cardText, /重新发送刚才的指令/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener binds a project from a project card action", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-project-action-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const dbPath = join(dir, "state.sqlite");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await seedCodexStateDb(dbPath);
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        stateDbPath: dbPath
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+    const project = (await listCodexProjects(config.codex))[0];
+
+    await (
+      listener as unknown as {
+        completeCardAction: (
+          event: { messageId: string; chatId: string; operator: { openId: string } },
+          action: { type: "bind-project"; projectId: string },
+          feishuClient: FeishuClient
+        ) => Promise<void>;
+      }
+    ).completeCardAction(
+      { messageId: "om_card", chatId: "oc_test", operator: { openId: "ou_operator" } },
+      { type: "bind-project", projectId: project.id },
+      client
+    );
+
+    assert.equal(client.texts.length, 1);
+    assert.match(client.texts[0].text, /已为当前群绑定 Codex project/);
+    const binding = await getChatSessionBinding(queuePath, "oc_test");
+    assert.equal(binding?.projectId, project.id);
+    assert.equal(binding?.sessionId, "session_new");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener runs help-card command actions", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-help-action-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+
+    await (
+      listener as unknown as {
+        completeCardAction: (
+          event: { messageId: string; chatId: string; operator: { openId: string } },
+          action: { type: "run-command"; command: string },
+          feishuClient: FeishuClient
+        ) => Promise<void>;
+      }
+    ).completeCardAction(
+      { messageId: "om_card", chatId: "oc_test", operator: { openId: "ou_operator" } },
+      { type: "run-command", command: "current-project" },
+      client
+    );
+
+    assert.equal(client.texts.length, 1);
+    assert.match(client.texts[0].text, /当前群绑定的 Codex project/);
+    assert.match(client.texts[0].text, /project id: proj_/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener creates and binds a new session in the current project", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-new-session-"));
+  const projectRoot = join(dir, "project");
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const dbPath = join(dir, "state.sqlite");
+  const scriptPath = join(dir, "fake-codex.mjs");
+  const argsPath = join(dir, "args.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await mkdir(projectRoot, { recursive: true });
+    await execFileAsync("sqlite3", [
+      dbPath,
+      `
+create table threads (
+  id text primary key,
+  title text not null,
+  cwd text not null,
+  source text not null,
+  updated_at integer not null,
+  created_at integer not null,
+  archived integer not null,
+  model text,
+  git_branch text,
+  rollout_path text,
+  first_user_message text
+);
+insert into threads values ('session_current', '当前会话', '${projectRoot.replaceAll("'", "''")}', 'codex', 2000, 1000, 0, 'gpt-5', 'main', '', '当前需求');
+`
+    ]);
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const outputPath = args[args.indexOf("-o") + 1];
+const prompt = readFileSync(0, "utf8").trim();
+const sql = "insert into threads values ('session_fresh', '新会话', " +
+  ${JSON.stringify(`'${projectRoot.replaceAll("'", "''")}'`)} +
+  ", 'codex', 3000, 3000, 0, 'gpt-5', 'main', '', '" + prompt.replaceAll("'", "''") + "');";
+execFileSync("sqlite3", [${JSON.stringify(dbPath)}, sql]);
+writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args, cwd: process.cwd(), prompt }));
+writeFileSync(outputPath, "新会话已创建");
+`,
+      "utf8"
+    );
+    await chmod(scriptPath, 0o755);
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        command: scriptPath,
+        stateDbPath: dbPath,
+        outputDir: join(dir, "codex-output"),
+        timeoutMs: 5000
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+    const project = (await listCodexProjects(config.codex))[0];
+    await upsertChatSessionBinding(queuePath, {
+      chatId: "oc_test",
+      chatType: "group",
+      session: project.latestSession
+    });
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> new-session 先了解当前项目"
+      }),
+      mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
+    }), config, client);
+
+    assert.equal((await listCommands(queuePath)).length, 0);
+    const binding = await getChatSessionBinding(queuePath, "oc_test");
+    assert.equal(binding?.sessionId, "session_fresh");
+    assert.equal(binding?.projectId, project.id);
+    assert.equal(client.texts.length, 2);
+    assert.match(client.texts[0].text, /正在当前 project 下创建/);
+    assert.match(client.texts[1].text, /已在当前 project 下创建并绑定新的 active session/);
+    assert.match(client.texts[1].text, /session_fresh/);
+    assert.match(client.texts[1].text, /新会话已创建/);
+    const recorded = JSON.parse(await readFile(argsPath, "utf8"));
+    assert.equal(recorded.cwd, await realpath(projectRoot));
+    assert.equal(recorded.prompt, "先了解当前项目");
+    assert.ok(recorded.args.includes("--cd"));
+    assert.ok(recorded.args.includes(await realpath(projectRoot)));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -535,7 +733,32 @@ test("listener reloads config before handling session control commands", async (
 test("listener handles session control commands directly without enqueueing", async () => {
   const cases = [
     {
+      text: "help",
+      expectedCards: 1,
+      expectedSessionId: undefined
+    },
+    {
+      text: "list-project",
+      expectedCards: 1,
+      expectedSessionId: undefined
+    },
+    {
+      text: "list-project 2",
+      expectedCards: 1,
+      expectedSessionId: undefined
+    },
+    {
       text: "list-session",
+      expectedCards: 1,
+      expectedSessionId: undefined
+    },
+    {
+      text: "list-session --all 1",
+      expectedCards: 1,
+      expectedSessionId: undefined
+    },
+    {
+      text: "list-session --temp 1",
       expectedCards: 1,
       expectedSessionId: undefined
     },
@@ -548,18 +771,27 @@ test("listener handles session control commands directly without enqueueing", as
       text: "switch-session 1",
       expectedCards: 0,
       expectedText: /已介入 Codex 会话/,
-      expectedSessionId: "session_new"
+      expectedSessionId: "session_new",
+      initialSessionId: "session_new"
     },
     {
       text: "switch-session session_old",
       expectedCards: 0,
-      expectedText: /已介入 Codex 会话/,
-      expectedSessionId: "session_old"
+      expectedText: /不属于当前群绑定的 project/,
+      expectedSessionId: "session_new",
+      initialSessionId: "session_new"
     },
     {
       text: "current-session",
       expectedCards: 0,
-      expectedText: /当前群绑定的 Codex 会话/,
+      expectedText: /当前群绑定的 Codex project/,
+      expectedSessionId: undefined,
+      initialSessionId: "session_new"
+    },
+    {
+      text: "current-project",
+      expectedCards: 0,
+      expectedText: /project id: proj_/,
       expectedSessionId: undefined,
       initialSessionId: "session_new"
     }
@@ -657,7 +889,7 @@ test("listener warns when selecting a session already bound to another chat", as
     await writeFile(configPath, JSON.stringify(config), "utf8");
 
     await invokeMessageReceive(listener, makeMessageEvent({
-      content: JSON.stringify({ text: "<at user_id=\"ou_bot\">Agent</at> switch-session 1" }),
+      content: JSON.stringify({ text: "<at user_id=\"ou_bot\">Agent</at> bind-project 1" }),
       mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
     }), config, client);
 
@@ -707,9 +939,46 @@ test("listener unbinds the current chat session", async () => {
     }), config, client);
 
     assert.equal(client.texts.length, 1);
-    assert.match(client.texts[0].text, /已解除当前群与 Codex 会话的绑定/);
+    assert.match(client.texts[0].text, /已解除当前群与 Codex project \/ session 的绑定/);
     assert.match(client.texts[0].text, /当前群/);
     assert.match(client.texts[0].text, /session_new/);
+    assert.equal(await getChatSessionBinding(queuePath, "oc_test"), undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener unbinds the current chat project", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-unbind-project-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      content: JSON.stringify({ text: "<at user_id=\"ou_bot\">Agent</at> unbind-project" }),
+      mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
+    }), config, client);
+
+    assert.equal(client.texts.length, 1);
+    assert.match(client.texts[0].text, /已解除当前群与 Codex project \/ session 的绑定/);
     assert.equal(await getChatSessionBinding(queuePath, "oc_test"), undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -741,7 +1010,7 @@ test("listener reports when unbind-session has no current chat binding", async (
     }), config, client);
 
     assert.equal(client.texts.length, 1);
-    assert.match(client.texts[0].text, /当前群没有绑定 Codex 会话，无需解绑/);
+    assert.match(client.texts[0].text, /当前群没有绑定 Codex project，无需解绑/);
     assert.equal(await getChatSessionBinding(queuePath, "oc_test"), undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });

@@ -228,6 +228,7 @@ test("command queue stores attachments and chat session bindings", async () => {
     assert.equal(commands[0].attachments?.length, 1);
     assert.equal(commands[0].attachments?.[0].resourceKey, "img_key");
     assert.equal(commands[0].sessionCwd, "/tmp/image");
+    assert.equal(commands[0].projectDisplayLabel, "image");
 
     await upsertChatSessionBinding(queuePath, {
       chatId: "oc_other",
@@ -251,6 +252,53 @@ test("command queue stores attachments and chat session bindings", async () => {
     const deleted = await deleteChatSessionBinding(queuePath, "oc_other");
     assert.equal(deleted?.sessionId, "session_image");
     assert.equal(await getChatSessionBinding(queuePath, "oc_other"), undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chat session binding schema backfills project fields for legacy rows", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-chat-binding-migrate-"));
+  const queuePath = join(dir, "commands.db");
+  try {
+    await execFileAsync("sqlite3", [
+      queuePath,
+      `
+create table chat_session_bindings (
+  chat_id text primary key,
+  chat_type text,
+  chat_name text,
+  session_id text not null,
+  session_title text,
+  session_cwd text,
+  session_source text,
+  session_git_branch text,
+  session_updated_at integer,
+  created_at text not null,
+  updated_at text not null
+);
+insert into chat_session_bindings values (
+  'oc_legacy', 'group', '旧群', 'session_legacy', '旧会话', '/tmp/legacy-project',
+  'codex', null, 2000, '2026-05-15T00:00:00.000Z', '2026-05-15T00:00:00.000Z'
+);
+`
+    ]);
+
+    const binding = await getChatSessionBinding(queuePath, "oc_legacy");
+    assert.equal(binding?.projectKind, "workspace");
+    assert.equal(binding?.projectDisplayLabel, "legacy-project");
+
+    const rows = await execFileAsync("sqlite3", [
+      "-json",
+      queuePath,
+      "select project_id as projectId, project_display_label as projectDisplayLabel from chat_session_bindings where chat_id = 'oc_legacy';"
+    ]);
+    const parsed = JSON.parse(rows.stdout) as Array<{
+      projectId: string | null;
+      projectDisplayLabel: string | null;
+    }>;
+    assert.match(parsed[0].projectId ?? "", /^proj_/);
+    assert.equal(parsed[0].projectDisplayLabel, "legacy-project");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
