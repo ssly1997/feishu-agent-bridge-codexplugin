@@ -909,13 +909,15 @@ test("listener warns when selecting a session already bound to another chat", as
   }
 });
 
-test("listener unbinds the current chat session", async () => {
+test("listener unbinds only the active session and keeps the chat project", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-inbound-unbind-session-"));
   const queuePath = join(dir, "commands.db");
+  const dbPath = join(dir, "codex-state.sqlite");
   const configPath = join(dir, "config.json");
   const client = new FakeFeishuClient();
   const listener = new FeishuCommandListener({ configPath });
   try {
+    await seedCodexStateDb(dbPath);
     await bindChat(queuePath, "oc_test", "session_new", "当前群");
     const config = {
       ...DEFAULT_CONFIG,
@@ -928,7 +930,8 @@ test("listener unbinds the current chat session", async () => {
       },
       codex: {
         ...DEFAULT_CONFIG.codex,
-        enabled: true
+        enabled: true,
+        stateDbPath: dbPath
       }
     };
     await writeFile(configPath, JSON.stringify(config), "utf8");
@@ -939,10 +942,24 @@ test("listener unbinds the current chat session", async () => {
     }), config, client);
 
     assert.equal(client.texts.length, 1);
-    assert.match(client.texts[0].text, /已解除当前群与 Codex project \/ session 的绑定/);
+    assert.match(client.texts[0].text, /已解除当前群 active session/);
+    assert.match(client.texts[0].text, /保留 Codex project/);
     assert.match(client.texts[0].text, /当前群/);
     assert.match(client.texts[0].text, /session_new/);
-    assert.equal(await getChatSessionBinding(queuePath, "oc_test"), undefined);
+    const binding = await getChatSessionBinding(queuePath, "oc_test");
+    assert.equal(binding?.sessionId, undefined);
+    assert.match(binding?.projectId ?? "", /^proj_/);
+    assert.equal(binding?.projectDisplayLabel, "new");
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      messageId: "om_after_unbind_session",
+      content: JSON.stringify({ text: "<at user_id=\"ou_bot\">Agent</at> 继续执行" }),
+      mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
+    }), config, client);
+
+    assert.equal(client.cards.length, 1);
+    assert.match(JSON.stringify(client.cards[0].card), /还没有 active session/);
+    assert.deepEqual(await listCommands(queuePath), []);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -985,7 +1002,7 @@ test("listener unbinds the current chat project", async () => {
   }
 });
 
-test("listener reports when unbind-session has no current chat binding", async () => {
+test("listener reports when unbind-session has no current project binding", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-inbound-unbind-empty-"));
   const queuePath = join(dir, "commands.db");
   const configPath = join(dir, "config.json");
@@ -1010,7 +1027,7 @@ test("listener reports when unbind-session has no current chat binding", async (
     }), config, client);
 
     assert.equal(client.texts.length, 1);
-    assert.match(client.texts[0].text, /当前群没有绑定 Codex project，无需解绑/);
+    assert.match(client.texts[0].text, /当前群没有绑定 Codex project/);
     assert.equal(await getChatSessionBinding(queuePath, "oc_test"), undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });

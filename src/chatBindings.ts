@@ -11,7 +11,7 @@ export interface ChatSessionBinding {
   chatId: string;
   chatType?: string;
   chatName?: string;
-  sessionId: string;
+  sessionId?: string;
   sessionTitle?: string;
   sessionCwd?: string;
   sessionSource?: string;
@@ -126,6 +126,30 @@ export async function deleteChatSessionBinding(
   return binding;
 }
 
+export async function clearChatActiveSession(
+  queuePath: string,
+  chatId: string
+): Promise<ChatSessionBinding | undefined> {
+  await ensureChatSessionBindingSchema(queuePath);
+  const binding = await getChatSessionBinding(queuePath, chatId);
+  if (!binding) return undefined;
+  if (!binding.sessionId) return binding;
+
+  await sqliteExec(
+    queuePath,
+    `update chat_session_bindings
+     set session_id = null,
+         session_title = null,
+         session_cwd = null,
+         session_source = null,
+         session_git_branch = null,
+         session_updated_at = null,
+         updated_at = ${sqlValue(new Date().toISOString())}
+     where chat_id = ${sqlValue(chatId)};`
+  );
+  return getChatSessionBinding(queuePath, chatId);
+}
+
 export async function updateChatSessionBindingChatName(
   queuePath: string,
   chatId: string,
@@ -145,7 +169,8 @@ export function bindingToCommandSession(binding: ChatSessionBinding): Pick<
   "sessionId" | "sessionTitle" | "sessionCwd" | "sessionSource" | "sessionGitBranch" | "sessionUpdatedAt" |
   "projectId" | "projectKind" | "projectRootPath" | "projectDisplayName" | "projectSecondaryName" |
   "projectDisplayLabel" | "projectLabelSource"
-> {
+> | undefined {
+  if (!binding.sessionId) return undefined;
   return {
     sessionId: binding.sessionId,
     sessionTitle: binding.sessionTitle,
@@ -168,6 +193,21 @@ export function formatCurrentChatSession(binding: ChatSessionBinding | undefined
     return "当前群没有绑定 Codex project。请先发送 list-project 选择一个 project。";
   }
 
+  const activeSessionLines = binding.sessionId
+    ? [
+      "Active session:",
+      `title: ${binding.sessionTitle || "(untitled)"}`,
+      `id: ${binding.sessionId}`,
+      binding.sessionCwd ? `cwd: ${binding.sessionCwd}` : undefined,
+      binding.sessionSource ? `source: ${binding.sessionSource}` : undefined,
+      binding.sessionGitBranch ? `branch: ${binding.sessionGitBranch}` : undefined,
+      binding.sessionUpdatedAt ? `session updated: ${formatTime(binding.sessionUpdatedAt)}` : undefined
+    ]
+    : [
+      "Active session:",
+      "未绑定 active session。请发送 list-session 选择会话，或发送 new-session 在当前 project 下开启新会话。"
+    ];
+
   return [
     "当前群绑定的 Codex project：",
     "",
@@ -176,13 +216,7 @@ export function formatCurrentChatSession(binding: ChatSessionBinding | undefined
     binding.projectId ? `project id: ${binding.projectId}` : undefined,
     binding.projectRootPath ? `project root: ${binding.projectRootPath}` : undefined,
     "",
-    "Active session:",
-    `title: ${binding.sessionTitle || "(untitled)"}`,
-    `id: ${binding.sessionId}`,
-    binding.sessionCwd ? `cwd: ${binding.sessionCwd}` : undefined,
-    binding.sessionSource ? `source: ${binding.sessionSource}` : undefined,
-    binding.sessionGitBranch ? `branch: ${binding.sessionGitBranch}` : undefined,
-    binding.sessionUpdatedAt ? `session updated: ${formatTime(binding.sessionUpdatedAt)}` : undefined,
+    ...activeSessionLines,
     `binding updated: ${binding.updatedAt}`
   ].filter((line): line is string => line !== undefined).join("\n");
 }
@@ -191,6 +225,18 @@ export function formatCurrentChatProject(binding: ChatSessionBinding | undefined
   if (!binding) {
     return "当前群没有绑定 Codex project。请先发送 list-project 选择一个 project。";
   }
+
+  const activeSessionLines = binding.sessionId
+    ? [
+      "Active session:",
+      `title: ${binding.sessionTitle || "(untitled)"}`,
+      `id: ${binding.sessionId}`,
+      binding.sessionUpdatedAt ? `session updated: ${formatTime(binding.sessionUpdatedAt)}` : undefined
+    ]
+    : [
+      "Active session:",
+      "未绑定 active session。"
+    ];
 
   return [
     "当前群绑定的 Codex project：",
@@ -202,10 +248,7 @@ export function formatCurrentChatProject(binding: ChatSessionBinding | undefined
     binding.projectRootPath ? `project root: ${binding.projectRootPath}` : undefined,
     binding.projectLabelSource ? `label source: ${binding.projectLabelSource}` : undefined,
     "",
-    "Active session:",
-    `title: ${binding.sessionTitle || "(untitled)"}`,
-    `id: ${binding.sessionId}`,
-    binding.sessionUpdatedAt ? `session updated: ${formatTime(binding.sessionUpdatedAt)}` : undefined,
+    ...activeSessionLines,
     `binding updated: ${binding.updatedAt}`
   ].filter((line): line is string => line !== undefined).join("\n");
 }
@@ -218,7 +261,7 @@ export async function ensureChatSessionBindingSchema(queuePath: string): Promise
        chat_id text primary key,
        chat_type text,
        chat_name text,
-       session_id text not null,
+       session_id text,
        session_title text,
        session_cwd text,
        session_source text,
@@ -238,6 +281,7 @@ export async function ensureChatSessionBindingSchema(queuePath: string): Promise
        on chat_session_bindings(session_id, updated_at);`
   );
   await ensureChatSessionBindingColumns(queuePath);
+  await ensureChatSessionBindingSessionNullable(queuePath);
   await backfillLegacyProjectColumns(queuePath);
   await sqliteExec(
     queuePath,
@@ -264,7 +308,7 @@ function rowToBinding(row: ChatSessionBindingRow): ChatSessionBinding {
     chatId: row.chat_id,
     chatType: row.chat_type ?? undefined,
     chatName: row.chat_name ?? undefined,
-    sessionId: row.session_id,
+    sessionId: row.session_id ?? undefined,
     sessionTitle: row.session_title ?? undefined,
     sessionCwd: row.session_cwd ?? undefined,
     sessionSource: row.session_source ?? undefined,
@@ -300,6 +344,57 @@ async function ensureChatSessionBindingColumns(queuePath: string): Promise<void>
   for (const [name, type] of missing) {
     await sqliteExec(queuePath, `alter table chat_session_bindings add column ${name} ${type};`);
   }
+}
+
+async function ensureChatSessionBindingSessionNullable(queuePath: string): Promise<void> {
+  const columns = await sqliteJson<{ name: string; notnull: number }>(
+    queuePath,
+    "pragma table_info(chat_session_bindings);"
+  );
+  const sessionIdColumn = columns.find((column) => column.name === "session_id");
+  if (!sessionIdColumn || Number(sessionIdColumn.notnull) === 0) return;
+
+  await sqliteExec(
+    queuePath,
+    `pragma foreign_keys = off;
+     begin immediate;
+     create table chat_session_bindings_new (
+       chat_id text primary key,
+       chat_type text,
+       chat_name text,
+       session_id text,
+       session_title text,
+       session_cwd text,
+       session_source text,
+       session_git_branch text,
+       session_updated_at integer,
+       project_id text,
+       project_kind text,
+       project_root_path text,
+       project_display_name text,
+       project_secondary_name text,
+       project_display_label text,
+       project_label_source text,
+       created_at text not null,
+       updated_at text not null
+     );
+     insert into chat_session_bindings_new (
+       chat_id, chat_type, chat_name, session_id, session_title, session_cwd,
+       session_source, session_git_branch, session_updated_at, project_id, project_kind,
+       project_root_path, project_display_name, project_secondary_name, project_display_label,
+       project_label_source, created_at, updated_at
+     )
+     select
+       chat_id, chat_type, chat_name, session_id, session_title, session_cwd,
+       session_source, session_git_branch, session_updated_at, project_id, project_kind,
+       project_root_path, project_display_name, project_secondary_name, project_display_label,
+       project_label_source, created_at, updated_at
+     from chat_session_bindings;
+     drop table chat_session_bindings;
+     alter table chat_session_bindings_new rename to chat_session_bindings;
+     commit;
+     pragma foreign_keys = on;`
+  );
 }
 
 async function backfillLegacyProjectColumns(queuePath: string): Promise<void> {
@@ -372,7 +467,7 @@ interface ChatSessionBindingRow {
   chat_id: string;
   chat_type: string | null;
   chat_name: string | null;
-  session_id: string;
+  session_id: string | null;
   session_title: string | null;
   session_cwd: string | null;
   session_source: string | null;

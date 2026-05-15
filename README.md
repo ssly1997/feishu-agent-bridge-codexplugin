@@ -363,8 +363,8 @@ corepack pnpm runtime
 @机器人 list-session --temp 2
 @机器人 switch-session <序号|sessionId>
 @机器人 current-session
-@机器人 unbind-project
 @机器人 unbind-session
+@机器人 unbind-project
 ```
 
 绑定规则：
@@ -378,10 +378,15 @@ corepack pnpm runtime
 - `list-session --temp` 展示 temporary session。
 - `switch-session` 只能切换当前 project 内的 session。跨 project 需要先 `switch-project`。
 - `new-session` 会在当前 project root 下启动新的 `codex exec`，等待本地 state DB 落盘后绑定为 active session。
-- `unbind-project` 会解除当前群与 project/session 的绑定。
-- `unbind-session` 是兼容旧命令，等同于当前群解绑 project/session。
+- `unbind-session` 只解除当前 active session，保留当前 project 绑定；后续可以继续 `list-session` / `new-session`。
+- `unbind-project` 会解除当前群与 project 的绑定，并清空 active session；后续普通任务会先要求重新绑定 project。
 
-普通自然语言指令只有在当前群已绑定 project/session 后才会入队。未绑定时，runtime 会返回 project 选择卡，并要求绑定后重新发送原指令。
+解绑指令语义：
+
+- `unbind-session` 用在“这个群仍然属于当前 project，但暂时不想继续沿用当前 Codex 会话”的场景。执行后 project 仍保留，普通任务会先要求选择 session 或创建 `new-session`。
+- `unbind-project` 用在“这个群不再绑定当前 project”的场景。执行后 project 和 active session 都会被清空，普通任务会先要求重新选择 project。
+
+普通自然语言指令只有在当前群已绑定 project 且有 active session 后才会入队。未绑定 project 时，runtime 会返回 project 选择卡；已绑定 project 但没有 active session 时，会返回当前 project 的 session 选择卡，并要求绑定 session 后重新发送原指令。
 
 ## 图片消息
 

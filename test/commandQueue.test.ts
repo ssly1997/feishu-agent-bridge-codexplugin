@@ -18,6 +18,7 @@ import {
 } from "../src/commandQueue.js";
 import {
   bindingToCommandSession,
+  clearChatActiveSession,
   deleteChatSessionBinding,
   getChatSessionBinding,
   listChatSessionBindingsBySession,
@@ -196,6 +197,8 @@ test("command queue stores attachments and chat session bindings", async () => {
     });
     assert.equal((await getChatSessionBinding(queuePath, "oc_test"))?.sessionId, "session_image");
     assert.equal((await getChatSessionBinding(queuePath, "oc_test"))?.chatName, "图片测试群");
+    const commandSession = bindingToCommandSession(binding);
+    assert.ok(commandSession);
 
     const result = await enqueueCommand(
       {
@@ -206,7 +209,7 @@ test("command queue stores attachments and chat session bindings", async () => {
         chatType: "group",
         sender: { openId: "ou_sender" },
         createdAt: "1710000000000",
-        ...bindingToCommandSession(binding),
+        ...commandSession,
         attachments: [
           {
             type: "image",
@@ -299,6 +302,11 @@ insert into chat_session_bindings values (
     }>;
     assert.match(parsed[0].projectId ?? "", /^proj_/);
     assert.equal(parsed[0].projectDisplayLabel, "legacy-project");
+
+    const sessionless = await clearChatActiveSession(queuePath, "oc_legacy");
+    assert.equal(sessionless?.sessionId, undefined);
+    assert.equal(sessionless?.projectDisplayLabel, "legacy-project");
+    assert.equal(bindingToCommandSession(sessionless!), undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -125,6 +125,7 @@ test("session formatters include selection commands", () => {
   assert.match(list, /switch-session <序号\|sessionId>/);
   assert.match(list, /current-session/);
   assert.match(list, /unbind-session/);
+  assert.match(list, /unbind-project/);
   assert.match(list, /session_new/);
   assert.match(formatSelectedSession(sessions[0]), /已介入 Codex 会话/);
 });

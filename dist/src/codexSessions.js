@@ -333,7 +333,8 @@ export function formatSessionList(sessions, limit) {
     lines.push("switch-session <序号|sessionId>");
     lines.push("");
     lines.push("查看当前会话：current-session");
-    lines.push("解绑当前绑定：unbind-session");
+    lines.push("只解绑 active session：unbind-session");
+    lines.push("解绑当前群 project：unbind-project");
     return lines.join("\n");
 }
 export function formatSelectedSession(session) {
@@ -711,8 +712,8 @@ function formatGlobalHelp() {
         "list-session --all [页码]：全局会话分页。",
         "list-session --temp [页码]：临时对话分页。",
         "current-session：查看当前绑定。",
-        "unbind-project：解除当前群 project / session 绑定。",
-        "unbind-session：兼容旧命令，等同于 unbind-project。",
+        "unbind-session：只解除当前群 active session，保留 project 绑定。",
+        "unbind-project：解除当前群 project 绑定，并清空 active session。",
         "",
         `分页默认每页 ${DEFAULT_SESSION_PAGE_SIZE} 个。临时对话默认不进入 project 绑定。`
     ].join("\n");

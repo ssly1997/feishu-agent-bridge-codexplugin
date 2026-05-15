@@ -70,7 +70,7 @@ export function buildCodexHelpCard(options = {}) {
             options.projectLabel ? `Project: ${options.projectLabel}` : undefined,
             options.sessionTitle || options.sessionId
                 ? `Active session: ${options.sessionTitle || "(untitled)"}${options.sessionId ? ` (#${shortId(options.sessionId)})` : ""}`
-                : undefined,
+                : "Active session: 未绑定",
             options.isTemporary ? "Temporary: yes" : undefined
         ].filter((line) => Boolean(line)).join("\n")
         : "当前群未绑定 project。发送 `list-project` 选择一个 project。";
@@ -119,15 +119,16 @@ export function buildCodexHelpCard(options = {}) {
             },
             {
                 command: "unbind-project",
-                description: "解除当前群 project / session 绑定",
+                description: "解绑 project",
                 buttonCommand: "unbind-project"
             },
             {
                 command: "unbind-session",
-                description: "兼容旧命令，等同于 unbind-project",
+                description: "解绑 active session",
                 buttonCommand: "unbind-session"
             }
         ]),
+        markdownBlock("**解绑说明**\n`unbind-session` 保留 project，只清 active session；`unbind-project` 清 project 和 active session。"),
         { tag: "hr" },
         markdownBlock("**全局和临时会话**"),
         ...helpCommandRows([
@@ -428,7 +429,7 @@ function sessionFooter(mode) {
     if (mode === "temp") {
         return "_分页文本备用：`list-session --temp 2`；临时对话需显式选择，不进入默认 project 列表。_";
     }
-    return "_按钮不可用时，可发送 `switch-session <序号|sessionId>`；解绑当前群可发送 `unbind-session`。_";
+    return "_按钮不可用时，可发送 `switch-session <序号|sessionId>`；只解绑 active session 用 `unbind-session`，解绑 project 用 `unbind-project`。_";
 }
 function parseActionObject(value) {
     if (typeof value === "string") {

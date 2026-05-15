@@ -179,6 +179,9 @@ test("buildCodexHelpCard renders command shortcut buttons", () => {
   const text = JSON.stringify(card);
   assert.match(text, /current-project/);
   assert.match(text, /unbind-project/);
+  assert.match(text, /unbind-session/);
+  assert.match(text, /解绑说明/);
+  assert.match(text, /保留 project，只清 active session/);
   assert.match(text, /new-session/);
   assert.match(text, /run_codex_command/);
   assert.deepEqual(collectRunCommands(card), [
