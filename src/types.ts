@@ -12,6 +12,8 @@ export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-ac
 
 export type CodexApprovalPolicy = "untrusted" | "on-request" | "on-failure" | "never";
 
+export type CodexInProgressRecovery = "mark_failed" | "reset_pending";
+
 export interface BridgeConfig {
   appId?: string;
   appSecret?: string;
@@ -27,15 +29,17 @@ export interface BridgeConfig {
 export interface InboundConfig {
   enabled: boolean;
   mode: InboundMode;
+  /**
+   * Legacy JSON queue path. Kept only as an import source for commands.db.
+   */
   queuePath?: string;
+  queueDbPath?: string;
   requireMention: boolean;
   botOpenId?: string;
   allowedChatIds?: string[];
   allowedOpenIds?: string[];
   acknowledgeOnReceive: boolean;
   acknowledgementText: string;
-  pollingEnabled: boolean;
-  pollIntervalSeconds: number;
 }
 
 export interface CodexCliConfig {
@@ -56,7 +60,8 @@ export interface CodexCliConfig {
   approvalPolicy?: CodexApprovalPolicy;
   extraArgs?: string[];
   timeoutMs: number;
-  pollIntervalSeconds: number;
+  inProgressTimeoutMs: number;
+  inProgressRecovery: CodexInProgressRecovery;
   sessionListLimit: number;
   outputMaxBytes: number;
   notifyResult: boolean;
@@ -73,6 +78,9 @@ export interface NotifyInput {
   status?: NotifyStatus | string;
   summary: string;
   cwd?: string;
+  codexSessionId?: string;
+  codexSessionTitle?: string;
+  codexSessionLabel?: string;
   artifacts?: string[];
   links?: LinkItem[];
   nextSteps?: string[];
@@ -116,6 +124,12 @@ export interface AgentCommand {
   tenantKey?: string;
   createdAt?: string;
   receivedAt: string;
+  sessionId?: string;
+  sessionTitle?: string;
+  sessionCwd?: string;
+  sessionSource?: string;
+  sessionGitBranch?: string;
+  sessionUpdatedAt?: number;
   claimedAt?: string;
   completedAt?: string;
   attempts: number;
@@ -132,4 +146,10 @@ export interface NewAgentCommand {
   eventId?: string;
   tenantKey?: string;
   createdAt?: string;
+  sessionId: string;
+  sessionTitle?: string;
+  sessionCwd?: string;
+  sessionSource?: string;
+  sessionGitBranch?: string;
+  sessionUpdatedAt?: number;
 }

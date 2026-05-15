@@ -23,7 +23,15 @@ interface Card {
   };
 }
 
-export function buildNotificationCard(input: NotifyInput, config: BridgeConfig): Card {
+interface BuildNotificationCardOptions {
+  useConfiguredCodexSession?: boolean;
+}
+
+export function buildNotificationCard(
+  input: NotifyInput,
+  config: BridgeConfig,
+  options: BuildNotificationCardOptions = {}
+): Card {
   const status = normalizeStatus(input.status);
   const title = truncate(input.title || config.defaultTitle, 80);
   const effectiveCwd = input.cwd || config.codex.cwd;
@@ -35,7 +43,9 @@ export function buildNotificationCard(input: NotifyInput, config: BridgeConfig):
         `**Status:** ${escapeMarkdownValue(statusLabel(status))}`,
         `**Source:** ${escapeMarkdownValue(input.source || "agent")}`,
         `**Project:** ${escapeMarkdownValue(projectLabel(effectiveCwd))}`,
-        `**Codex session:** ${escapeMarkdownValue(sessionLabel(config))}`
+        `**Codex session:** ${escapeMarkdownValue(
+          sessionLabel(input, config, options.useConfiguredCodexSession ?? true)
+        )}`
       ].join("\n")
     )
   );
@@ -150,7 +160,20 @@ function projectLabel(cwd: string | undefined): string {
   return basename(cwd) || cwd;
 }
 
-function sessionLabel(config: BridgeConfig): string {
+function sessionLabel(
+  input: NotifyInput,
+  config: BridgeConfig,
+  useConfiguredCodexSession: boolean
+): string {
+  if (input.codexSessionLabel) return input.codexSessionLabel;
+  if (input.codexSessionTitle) {
+    const suffix = input.codexSessionId ? ` (#${shortSessionId(input.codexSessionId)})` : "";
+    return `${input.codexSessionTitle}${suffix}`;
+  }
+  if (input.codexSessionId) return `#${shortSessionId(input.codexSessionId)}`;
+
+  if (!useConfiguredCodexSession) return "(unbound)";
+
   if (config.codex.sessionTitle) {
     const suffix = config.codex.sessionId ? ` (#${shortSessionId(config.codex.sessionId)})` : "";
     return `${config.codex.sessionTitle}${suffix}`;

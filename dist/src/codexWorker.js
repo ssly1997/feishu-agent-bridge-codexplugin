@@ -10,10 +10,12 @@ export async function processNextCodexCommand(options = {}) {
     const config = await loadConfig(configPath);
     const queuePath = resolveCommandQueuePath(config);
     const base = {
-        queuePath,
-        pollIntervalSeconds: config.codex.pollIntervalSeconds
+        queuePath
     };
-    const command = await getNextCommand(queuePath, { claim: true });
+    const command = await getNextCommand(queuePath, {
+        claim: true,
+        sessionId: options.sessionId
+    });
     if (!command) {
         return {
             ...base,
@@ -40,7 +42,7 @@ export async function processNextCodexCommand(options = {}) {
             notifyError: notifyResult.error
         };
     }
-    if (!config.codex.enabled) {
+    if (!config.codex.enabled || !command.sessionId) {
         summary = "Codex CLI 未启用。请先发送 list-session 选择一个 Codex 会话，或在配置中设置 codex.enabled=true。";
         const updatedCommand = await ackCommand(command.id, "failed", queuePath, summary);
         const notifyResult = await notifyCommandResult(config, updatedCommand ?? command, "failed", "Codex CLI disabled", summary, undefined, options.feishuClient ?? new FeishuClient());
@@ -55,7 +57,7 @@ export async function processNextCodexCommand(options = {}) {
         };
     }
     try {
-        codex = await runCodexResume(buildFeishuCommandPrompt(command), config.codex, {
+        codex = await runCodexResume(buildFeishuCommandPrompt(command), codexConfigForCommand(config, command), {
             outputPath: codexOutputPath(config, command),
             now: options.now
         });
@@ -81,11 +83,23 @@ export async function processNextCodexCommand(options = {}) {
 function codexOutputPath(config, command) {
     return join(config.codex.outputDir ?? join(CONFIG_DIR, "codex-output"), `${safeFilename(command.id)}.txt`);
 }
+function codexConfigForCommand(config, command) {
+    return {
+        ...config.codex,
+        sessionId: command.sessionId,
+        sessionTitle: command.sessionTitle,
+        sessionSource: command.sessionSource,
+        sessionGitBranch: command.sessionGitBranch,
+        sessionUpdatedAt: command.sessionUpdatedAt,
+        cwd: command.sessionCwd,
+        useLast: false
+    };
+}
 export function buildFeishuCommandPrompt(command) {
     return [
         "你正在处理一条来自飞书群聊的 Agent 指令。",
         "请执行用户的原始指令，并把最终答复写在本次 Codex 回复中。",
-        "不要调用 feishu_notify、feishu_notify_task_result、feishu_send_test 或其他飞书发送工具；外层 feishu-agent-bridge worker 会自动把你的最终答复转发回飞书。",
+        "不要调用 feishu_notify、feishu_notify_task_result、feishu_send_test 或其他飞书发送工具；外层 feishu-agent-bridge runtime 会自动把你的最终答复转发回飞书。",
         "如果用户要求“回消息”“发消息”或“验证飞书消息格式”，也只需要在最终答复中写出要返回的内容。",
         "",
         "用户原始指令：",
@@ -102,7 +116,9 @@ async function notifyCommandResult(config, command, ackState, title, summary, co
         title,
         status,
         summary,
-        cwd: config.codex.cwd,
+        cwd: command.sessionCwd ?? config.codex.cwd,
+        codexSessionId: command.sessionId,
+        codexSessionTitle: command.sessionTitle,
         artifacts: codex?.outputPath ? [codex.outputPath] : undefined,
         metadata: {
             commandId: command.id,

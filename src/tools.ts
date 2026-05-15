@@ -11,11 +11,13 @@ import {
   ackCommand,
   getCommandQueueStats,
   getNextCommand,
+  initializeCommandQueue,
   listCommands,
-  resolveCommandQueuePath
+  resolveCommandQueuePath,
+  resolveLegacyCommandQueuePath
 } from "./commandQueue.js";
 import { FeishuApiError, FeishuClient } from "./feishuClient.js";
-import { FeishuCommandListener } from "./inbound.js";
+import { readStandaloneListenerRuntimeStatus } from "./listenerRuntime.js";
 import type {
   AgentCommandState,
   NotifyInput,
@@ -52,6 +54,18 @@ const notifyProperties = {
   cwd: {
     type: "string",
     description: "Working directory or execution context."
+  },
+  codexSessionId: {
+    type: "string",
+    description: "Codex session id for this specific notification."
+  },
+  codexSessionTitle: {
+    type: "string",
+    description: "Human-readable Codex session title for this specific notification."
+  },
+  codexSessionLabel: {
+    type: "string",
+    description: "Preformatted Codex session label for this specific notification."
   },
   artifacts: {
     type: "array",
@@ -91,7 +105,6 @@ export function createToolRegistry(options: {
 } = {}): ToolRegistry {
   const configPath = options.configPath ?? CONFIG_PATH;
   const feishuClient = options.feishuClient ?? new FeishuClient();
-  let commandListener: FeishuCommandListener | undefined;
 
   const definitions: ToolDefinition[] = [
     {
@@ -169,7 +182,7 @@ export function createToolRegistry(options: {
     },
     {
       name: "feishu_start_command_listener",
-      description: "Start the Feishu long-connection listener inside this MCP server process.",
+      description: "Show how to start the standalone Feishu runtime listener.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -178,7 +191,7 @@ export function createToolRegistry(options: {
     },
     {
       name: "feishu_stop_command_listener",
-      description: "Stop the Feishu long-connection listener running inside this MCP server process.",
+      description: "Explain how to stop the standalone Feishu runtime listener.",
       inputSchema: {
         type: "object",
         properties: {
@@ -199,6 +212,10 @@ export function createToolRegistry(options: {
           claim: {
             type: "boolean",
             description: "Mark the command as in_progress before returning it. Defaults to true."
+          },
+          sessionId: {
+            type: "string",
+            description: "Only return commands for this Codex session."
           }
         },
         additionalProperties: false
@@ -237,6 +254,10 @@ export function createToolRegistry(options: {
           limit: {
             type: "number",
             description: "Maximum commands to return."
+          },
+          sessionId: {
+            type: "string",
+            description: "Only list commands for this Codex session."
           }
         },
         additionalProperties: false
@@ -268,32 +289,9 @@ export function createToolRegistry(options: {
     ["feishu_send_test", (args) => sendTest(args, configPath, feishuClient)],
     ["feishu_status", () => showStatus(configPath, feishuClient)],
     ["feishu_set_enabled", (args) => setEnabled(args, configPath)],
-    [
-      "feishu_command_status",
-      () => showCommandStatus(configPath, () => commandListener?.getStatus())
-    ],
-    [
-      "feishu_start_command_listener",
-      async () => {
-        if (!commandListener) {
-          commandListener = new FeishuCommandListener({ configPath, feishuClient });
-        }
-        const status = await commandListener.start();
-        return jsonResult({ started: true, listener: status });
-      }
-    ],
-    [
-      "feishu_stop_command_listener",
-      async (args) => {
-        const value = ensureObject(args, "feishu_stop_command_listener arguments");
-        const force = optionalBoolean(value.force, "force") ?? false;
-        if (!commandListener) {
-          return jsonResult({ stopped: false, listener: { running: false } });
-        }
-        commandListener.stop(force);
-        return jsonResult({ stopped: true, listener: commandListener.getStatus() });
-      }
-    ],
+    ["feishu_command_status", () => showCommandStatus(configPath)],
+    ["feishu_start_command_listener", () => runtimeGuide(configPath, "start")],
+    ["feishu_stop_command_listener", () => runtimeGuide(configPath, "stop")],
     ["feishu_next_command", (args) => nextCommand(args, configPath)],
     ["feishu_ack_command", (args) => acknowledgeCommand(args, configPath)],
     ["feishu_list_commands", (args) => listQueuedCommands(args, configPath)],
@@ -332,7 +330,7 @@ async function sendNotify(
     return textResult(`skipped: Feishu notifications are disabled in ${options.configPath}`);
   }
 
-  const card = buildNotificationCard(input, config);
+  const card = buildNotificationCard(input, config, { useConfiguredCodexSession: false });
   const sendResult = await options.feishuClient.sendInteractiveMessage(config, card);
   return textResult(`sent: Feishu notification delivered${sendResult.messageId ? ` message_id=${sendResult.messageId}` : ""}`);
 }
@@ -378,32 +376,54 @@ async function setEnabled(args: unknown, configPath: string): Promise<ToolResult
   return textResult(`updated: enabled=${config.enabled}`);
 }
 
-async function showCommandStatus(
-  configPath: string,
-  getListenerStatus: () => ReturnType<FeishuCommandListener["getStatus"]> | undefined
-): Promise<ToolResult> {
+async function showCommandStatus(configPath: string): Promise<ToolResult> {
   const config = await loadConfig(configPath);
   const queuePath = resolveCommandQueuePath(config);
+  await initializeCommandQueue(queuePath, { legacyJsonPath: resolveLegacyCommandQueuePath(config) });
+  const runtimeStatus = await readStandaloneListenerRuntimeStatus(configPath);
+
   return jsonResult({
     configPath,
     readiness: getConfigReadiness(config),
     inbound: sanitizeConfig(config).inbound,
-    listener: getListenerStatus() ?? {
-      running: false,
-      ready: false,
-      configPath,
-      queuePath
-    },
+    listener: runtimeStatus ?? {
+          running: false,
+          ready: false,
+          managedBy: "none",
+          configPath,
+          queuePath,
+          enqueuedCount: 0,
+          ignoredCount: 0
+        },
     queue: await getCommandQueueStats(queuePath)
+  });
+}
+
+async function runtimeGuide(
+  configPath: string,
+  action: "start" | "stop"
+): Promise<ToolResult> {
+  const runtime = await readStandaloneListenerRuntimeStatus(configPath);
+  return jsonResult({
+    managedBy: "runtime",
+    action,
+    runtime: runtime ?? null,
+    command: "node dist/src/runtime.js",
+    screenCommand: "screen -dmS fab-runtime zsh -lc 'node dist/src/runtime.js >> ~/.feishu-agent-bridge/runtime.log 2>&1'",
+    message: action === "start"
+      ? "Start the standalone runtime outside the MCP server process. MCP-hosted listeners are deprecated."
+      : "Stop the standalone runtime from the process manager that started it, for example: screen -S fab-runtime -X quit."
   });
 }
 
 async function nextCommand(args: unknown, configPath: string): Promise<ToolResult> {
   const value = ensureObject(args, "feishu_next_command arguments");
   const claim = optionalBoolean(value.claim, "claim") ?? true;
+  const sessionId = optionalString(value.sessionId, "sessionId");
   const config = await loadConfig(configPath);
   const queuePath = resolveCommandQueuePath(config);
-  const command = await getNextCommand(queuePath, { claim });
+  await initializeCommandQueue(queuePath, { legacyJsonPath: resolveLegacyCommandQueuePath(config) });
+  const command = await getNextCommand(queuePath, { claim, sessionId });
   return jsonResult({
     queuePath,
     claimed: Boolean(command && claim),
@@ -418,6 +438,7 @@ async function acknowledgeCommand(args: unknown, configPath: string): Promise<To
   const summary = optionalString(value.summary, "summary");
   const config = await loadConfig(configPath);
   const queuePath = resolveCommandQueuePath(config);
+  await initializeCommandQueue(queuePath, { legacyJsonPath: resolveLegacyCommandQueuePath(config) });
   const command = await ackCommand(id, status, queuePath, summary);
   if (!command) {
     throw new ConfigError(`Command not found: ${id}`);
@@ -432,9 +453,11 @@ async function listQueuedCommands(args: unknown, configPath: string): Promise<To
   const value = ensureObject(args, "feishu_list_commands arguments");
   const state = optionalCommandState(value.state, "state");
   const limit = optionalPositiveInteger(value.limit, "limit");
+  const sessionId = optionalString(value.sessionId, "sessionId");
   const config = await loadConfig(configPath);
   const queuePath = resolveCommandQueuePath(config);
-  const commands = await listCommands(queuePath, { state, limit });
+  await initializeCommandQueue(queuePath, { legacyJsonPath: resolveLegacyCommandQueuePath(config) });
+  const commands = await listCommands(queuePath, { state, limit, sessionId });
   return jsonResult({
     queuePath,
     commands
@@ -468,6 +491,9 @@ function parseNotifyInput(
     status,
     summary,
     cwd: optionalString(value.cwd, "cwd"),
+    codexSessionId: optionalString(value.codexSessionId, "codexSessionId"),
+    codexSessionTitle: optionalString(value.codexSessionTitle, "codexSessionTitle"),
+    codexSessionLabel: optionalString(value.codexSessionLabel, "codexSessionLabel"),
     artifacts: optionalStringArray(value.artifacts, "artifacts"),
     links: parseLinks(value.links),
     nextSteps: optionalStringArray(value.nextSteps, "nextSteps"),

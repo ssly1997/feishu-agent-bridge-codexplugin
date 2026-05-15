@@ -1,14 +1,28 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdir, readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 import { CONFIG_DIR } from "./config.js";
-export const DEFAULT_COMMAND_QUEUE_PATH = join(CONFIG_DIR, "commands.json");
+const execFileAsync = promisify(execFile);
+export const DEFAULT_COMMAND_QUEUE_DB_PATH = join(CONFIG_DIR, "commands.db");
+export const DEFAULT_LEGACY_COMMAND_QUEUE_PATH = join(CONFIG_DIR, "commands.json");
+export const DEFAULT_COMMAND_QUEUE_PATH = DEFAULT_COMMAND_QUEUE_DB_PATH;
 export function resolveCommandQueuePath(config) {
-    return config.inbound.queuePath ?? DEFAULT_COMMAND_QUEUE_PATH;
+    return config.inbound.queueDbPath ?? DEFAULT_COMMAND_QUEUE_DB_PATH;
 }
-export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_PATH) {
-    const commands = await readCommandQueue(queuePath);
-    const existing = commands.find((command) => command.messageId === input.messageId);
+export function resolveLegacyCommandQueuePath(config) {
+    return config.inbound.queuePath ?? DEFAULT_LEGACY_COMMAND_QUEUE_PATH;
+}
+export async function initializeCommandQueue(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH, options = {}) {
+    await ensureSchema(queuePath);
+    if (options.migrateLegacyJson ?? true) {
+        await migrateLegacyJsonQueue(queuePath, options.legacyJsonPath ?? DEFAULT_LEGACY_COMMAND_QUEUE_PATH);
+    }
+}
+export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH) {
+    await ensureSchema(queuePath);
+    const existing = await findCommandByMessageId(queuePath, input.messageId);
     if (existing) {
         return { command: existing, inserted: false };
     }
@@ -27,77 +41,356 @@ export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_PA
         tenantKey: input.tenantKey,
         createdAt: input.createdAt,
         receivedAt: now,
+        sessionId: input.sessionId,
+        sessionTitle: input.sessionTitle,
+        sessionCwd: input.sessionCwd,
+        sessionSource: input.sessionSource,
+        sessionGitBranch: input.sessionGitBranch,
+        sessionUpdatedAt: input.sessionUpdatedAt,
         attempts: 0
     };
-    commands.push(command);
-    await writeCommandQueue(commands, queuePath);
+    await sqliteExec(queuePath, `insert into commands (
+      id, state, text, raw_text, message_id, chat_id, chat_type, sender_json, source,
+      event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
+      session_source, session_git_branch, session_updated_at, attempts
+    ) values (
+      ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
+      ${sqlValue(command.rawText)}, ${sqlValue(command.messageId)}, ${sqlValue(command.chatId)},
+      ${sqlValue(command.chatType)}, ${sqlValue(JSON.stringify(command.sender))},
+      ${sqlValue(command.source)}, ${sqlValue(command.eventId)}, ${sqlValue(command.tenantKey)},
+      ${sqlValue(command.createdAt)}, ${sqlValue(command.receivedAt)}, ${sqlValue(command.sessionId)},
+      ${sqlValue(command.sessionTitle)}, ${sqlValue(command.sessionCwd)}, ${sqlValue(command.sessionSource)},
+      ${sqlValue(command.sessionGitBranch)}, ${sqlNumber(command.sessionUpdatedAt)}, ${command.attempts}
+    );`);
     return { command, inserted: true };
 }
-export async function getNextCommand(queuePath = DEFAULT_COMMAND_QUEUE_PATH, options = {}) {
-    const claim = options.claim ?? true;
-    const commands = await readCommandQueue(queuePath);
-    const command = commands.find((item) => item.state === "pending");
-    if (!command)
-        return undefined;
-    if (claim) {
-        command.state = "in_progress";
-        command.claimedAt = new Date().toISOString();
-        command.attempts += 1;
-        await writeCommandQueue(commands, queuePath);
+export async function getNextCommand(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH, options = {}) {
+    await ensureSchema(queuePath);
+    const where = pendingWhere(options.sessionId);
+    if (options.claim ?? true) {
+        const now = new Date().toISOString();
+        const rows = await sqliteJson(queuePath, `begin immediate;
+       update commands
+       set state = 'in_progress',
+           claimed_at = ${sqlValue(now)},
+           attempts = attempts + 1
+       where id = (
+         select id from commands
+         where ${where}
+         order by received_at asc, id asc
+         limit 1
+       )
+       returning *;
+       commit;`);
+        return rows[0] ? rowToCommand(rows[0]) : undefined;
     }
-    return command;
+    const rows = await sqliteJson(queuePath, `select * from commands where ${where} order by received_at asc, id asc limit 1;`);
+    return rows[0] ? rowToCommand(rows[0]) : undefined;
 }
-export async function listCommands(queuePath = DEFAULT_COMMAND_QUEUE_PATH, options = {}) {
-    const commands = await readCommandQueue(queuePath);
-    const filtered = options.state
-        ? commands.filter((command) => command.state === options.state)
-        : commands;
-    return filtered.slice(0, options.limit ?? filtered.length);
+export async function listCommands(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH, options = {}) {
+    await ensureSchema(queuePath);
+    const filters = [
+        options.state ? `state = ${sqlValue(options.state)}` : undefined,
+        options.sessionId ? `session_id = ${sqlValue(options.sessionId)}` : undefined
+    ].filter((item) => Boolean(item));
+    const where = filters.length ? `where ${filters.join(" and ")}` : "";
+    const limit = positiveInteger(options.limit) ? `limit ${options.limit}` : "";
+    const rows = await sqliteJson(queuePath, `select * from commands ${where} order by received_at asc, id asc ${limit};`);
+    return rows.map(rowToCommand);
 }
-export async function ackCommand(id, state, queuePath = DEFAULT_COMMAND_QUEUE_PATH, resultSummary) {
-    const commands = await readCommandQueue(queuePath);
-    const command = commands.find((item) => item.id === id);
-    if (!command)
-        return undefined;
-    command.state = state;
-    command.completedAt = new Date().toISOString();
-    command.resultSummary = resultSummary;
-    await writeCommandQueue(commands, queuePath);
-    return command;
+export async function ackCommand(id, state, queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH, resultSummary) {
+    await ensureSchema(queuePath);
+    const rows = await sqliteJson(queuePath, `update commands
+     set state = ${sqlValue(state)},
+         completed_at = ${sqlValue(new Date().toISOString())},
+         result_summary = ${sqlValue(resultSummary)}
+     where id = ${sqlValue(id)}
+     returning *;`);
+    return rows[0] ? rowToCommand(rows[0]) : undefined;
 }
-export async function getCommandQueueStats(queuePath = DEFAULT_COMMAND_QUEUE_PATH) {
-    const commands = await readCommandQueue(queuePath);
+export async function getCommandQueueStats(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH) {
+    await ensureSchema(queuePath);
+    const totals = await sqliteJson(queuePath, `select
+       count(*) as total,
+       sum(case when state = 'pending' then 1 else 0 end) as pending,
+       sum(case when state = 'in_progress' then 1 else 0 end) as inProgress,
+       sum(case when state = 'done' then 1 else 0 end) as done,
+       sum(case when state = 'failed' then 1 else 0 end) as failed
+     from commands;`);
+    const sessions = await sqliteJson(queuePath, `select
+       session_id as sessionId,
+       max(session_title) as sessionTitle,
+       count(*) as total,
+       sum(case when state = 'pending' then 1 else 0 end) as pending,
+       sum(case when state = 'in_progress' then 1 else 0 end) as inProgress,
+       sum(case when state = 'done' then 1 else 0 end) as done,
+       sum(case when state = 'failed' then 1 else 0 end) as failed
+     from commands
+     where session_id is not null and session_id <> ''
+     group by session_id
+     order by max(received_at) desc;`);
+    const total = totals[0];
     return {
         queuePath,
-        total: commands.length,
-        pending: commands.filter((command) => command.state === "pending").length,
-        inProgress: commands.filter((command) => command.state === "in_progress").length,
-        done: commands.filter((command) => command.state === "done").length,
-        failed: commands.filter((command) => command.state === "failed").length
+        total: total?.total ?? 0,
+        pending: total?.pending ?? 0,
+        inProgress: total?.inProgress ?? 0,
+        done: total?.done ?? 0,
+        failed: total?.failed ?? 0,
+        sessions: sessions.map((row) => ({
+            sessionId: row.sessionId,
+            sessionTitle: row.sessionTitle ?? undefined,
+            total: row.total ?? 0,
+            pending: row.pending ?? 0,
+            inProgress: row.inProgress ?? 0,
+            done: row.done ?? 0,
+            failed: row.failed ?? 0
+        }))
     };
 }
-export async function readCommandQueue(queuePath = DEFAULT_COMMAND_QUEUE_PATH) {
+export async function readCommandQueue(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH) {
+    return listCommands(queuePath);
+}
+export async function getPendingSessionIds(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH) {
+    await ensureSchema(queuePath);
+    const rows = await sqliteJson(queuePath, `select distinct session_id as sessionId
+     from commands
+     where state = 'pending' and session_id is not null and session_id <> ''
+     order by session_id asc;`);
+    return rows.map((row) => row.sessionId);
+}
+export async function recoverInProgressCommands(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH, options) {
+    await ensureSchema(queuePath);
+    const cutoff = new Date((options.now?.() ?? Date.now()) - options.timeoutMs).toISOString();
+    const nextState = options.recovery === "reset_pending" ? "pending" : "failed";
+    const completedAt = options.recovery === "reset_pending" ? "null" : sqlValue(new Date().toISOString());
+    const claimedAt = options.recovery === "reset_pending" ? "null" : "claimed_at";
+    const summary = options.recovery === "reset_pending"
+        ? "result_summary"
+        : sqlValue(`Recovered stale in_progress command after ${options.timeoutMs}ms`);
+    const rows = await sqliteJson(queuePath, `begin immediate;
+     update commands
+     set state = ${sqlValue(nextState)},
+         claimed_at = ${claimedAt},
+         completed_at = ${completedAt},
+         result_summary = ${summary}
+     where state = 'in_progress'
+       and claimed_at is not null
+       and claimed_at < ${sqlValue(cutoff)};
+     select changes() as changed;
+     commit;`);
+    return rows[0]?.changed ?? 0;
+}
+async function migrateLegacyJsonQueue(queuePath, legacyJsonPath) {
     let raw;
     try {
-        raw = await readFile(queuePath, "utf8");
+        raw = await readFile(legacyJsonPath, "utf8");
     }
     catch (error) {
-        if (isNodeError(error) && error.code === "ENOENT") {
-            return [];
-        }
+        if (isNodeError(error) && error.code === "ENOENT")
+            return;
         throw error;
     }
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-        throw new Error(`Command queue must contain a JSON array: ${queuePath}`);
+    if (!Array.isArray(parsed))
+        return;
+    for (const item of parsed) {
+        const command = normalizeLegacyCommand(item);
+        if (!command || await findCommandByMessageId(queuePath, command.messageId))
+            continue;
+        await insertCommand(queuePath, command);
     }
-    return parsed;
 }
-async function writeCommandQueue(commands, queuePath) {
+async function insertCommand(queuePath, command) {
+    await sqliteExec(queuePath, `insert or ignore into commands (
+      id, state, text, raw_text, message_id, chat_id, chat_type, sender_json, source,
+      event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
+      session_source, session_git_branch, session_updated_at, claimed_at, completed_at,
+      attempts, result_summary
+    ) values (
+      ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
+      ${sqlValue(command.rawText)}, ${sqlValue(command.messageId)}, ${sqlValue(command.chatId)},
+      ${sqlValue(command.chatType)}, ${sqlValue(JSON.stringify(command.sender))},
+      ${sqlValue(command.source)}, ${sqlValue(command.eventId)}, ${sqlValue(command.tenantKey)},
+      ${sqlValue(command.createdAt)}, ${sqlValue(command.receivedAt)}, ${sqlValue(command.sessionId)},
+      ${sqlValue(command.sessionTitle)}, ${sqlValue(command.sessionCwd)}, ${sqlValue(command.sessionSource)},
+      ${sqlValue(command.sessionGitBranch)}, ${sqlNumber(command.sessionUpdatedAt)},
+      ${sqlValue(command.claimedAt)}, ${sqlValue(command.completedAt)}, ${command.attempts},
+      ${sqlValue(command.resultSummary)}
+    );`);
+}
+async function findCommandByMessageId(queuePath, messageId) {
+    const rows = await sqliteJson(queuePath, `select * from commands where message_id = ${sqlValue(messageId)} limit 1;`);
+    return rows[0] ? rowToCommand(rows[0]) : undefined;
+}
+async function ensureSchema(queuePath) {
     await mkdir(dirname(queuePath), { recursive: true });
-    const tempPath = `${queuePath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tempPath, `${JSON.stringify(commands, null, 2)}\n`, "utf8");
-    await rename(tempPath, queuePath);
+    await sqliteExec(queuePath, `pragma journal_mode = wal;
+     create table if not exists commands (
+       id text primary key,
+       state text not null check (state in ('pending', 'in_progress', 'done', 'failed')),
+       text text not null,
+       raw_text text not null,
+       message_id text not null unique,
+       chat_id text not null,
+       chat_type text,
+       sender_json text not null,
+       source text not null,
+       event_id text,
+       tenant_key text,
+       created_at text,
+       received_at text not null,
+       session_id text,
+       session_title text,
+       session_cwd text,
+       session_source text,
+       session_git_branch text,
+       session_updated_at integer,
+       claimed_at text,
+       completed_at text,
+       attempts integer not null default 0,
+       result_summary text
+     );
+     create index if not exists commands_state_session_idx
+       on commands(state, session_id, received_at, id);
+     create index if not exists commands_session_idx
+       on commands(session_id, received_at, id);`);
+}
+async function sqliteExec(queuePath, sql) {
+    await execFileAsync("sqlite3", [queuePath, sql], { maxBuffer: 10 * 1024 * 1024 });
+}
+async function sqliteJson(queuePath, sql) {
+    const { stdout } = await execFileAsync("sqlite3", ["-json", queuePath, sql], {
+        maxBuffer: 10 * 1024 * 1024
+    });
+    const trimmed = stdout.trim();
+    return trimmed ? JSON.parse(trimmed) : [];
+}
+function pendingWhere(sessionId) {
+    const base = "state = 'pending'";
+    if (sessionId) {
+        return [
+            base,
+            `session_id = ${sqlValue(sessionId)}`,
+            `not exists (
+        select 1 from commands active
+        where active.session_id = ${sqlValue(sessionId)}
+          and active.state = 'in_progress'
+      )`
+        ].join(" and ");
+    }
+    return [
+        base,
+        `(
+      session_id is null
+      or session_id = ''
+      or not exists (
+        select 1 from commands active
+        where active.session_id = commands.session_id
+          and active.state = 'in_progress'
+      )
+    )`
+    ].join(" and ");
+}
+function rowToCommand(row) {
+    return {
+        id: row.id,
+        state: row.state,
+        text: row.text,
+        rawText: row.raw_text,
+        messageId: row.message_id,
+        chatId: row.chat_id,
+        chatType: row.chat_type ?? undefined,
+        sender: parseSender(row.sender_json),
+        source: "feishu",
+        eventId: row.event_id ?? undefined,
+        tenantKey: row.tenant_key ?? undefined,
+        createdAt: row.created_at ?? undefined,
+        receivedAt: row.received_at,
+        sessionId: row.session_id ?? undefined,
+        sessionTitle: row.session_title ?? undefined,
+        sessionCwd: row.session_cwd ?? undefined,
+        sessionSource: row.session_source ?? undefined,
+        sessionGitBranch: row.session_git_branch ?? undefined,
+        sessionUpdatedAt: row.session_updated_at ?? undefined,
+        claimedAt: row.claimed_at ?? undefined,
+        completedAt: row.completed_at ?? undefined,
+        attempts: row.attempts,
+        resultSummary: row.result_summary ?? undefined
+    };
+}
+function normalizeLegacyCommand(value) {
+    if (!isRecord(value))
+        return undefined;
+    const id = stringValue(value.id);
+    const state = commandState(value.state);
+    const text = stringValue(value.text);
+    const rawText = stringValue(value.rawText);
+    const messageId = stringValue(value.messageId);
+    const chatId = stringValue(value.chatId);
+    const receivedAt = stringValue(value.receivedAt);
+    if (!id || !state || !text || !rawText || !messageId || !chatId || !receivedAt) {
+        return undefined;
+    }
+    return {
+        id,
+        state,
+        text,
+        rawText,
+        messageId,
+        chatId,
+        chatType: stringValue(value.chatType),
+        sender: isRecord(value.sender) ? value.sender : {},
+        source: "feishu",
+        eventId: stringValue(value.eventId),
+        tenantKey: stringValue(value.tenantKey),
+        createdAt: stringValue(value.createdAt),
+        receivedAt,
+        sessionId: stringValue(value.sessionId),
+        sessionTitle: stringValue(value.sessionTitle),
+        sessionCwd: stringValue(value.sessionCwd),
+        sessionSource: stringValue(value.sessionSource),
+        sessionGitBranch: stringValue(value.sessionGitBranch),
+        sessionUpdatedAt: numberValue(value.sessionUpdatedAt),
+        claimedAt: stringValue(value.claimedAt),
+        completedAt: stringValue(value.completedAt),
+        attempts: numberValue(value.attempts) ?? 0,
+        resultSummary: stringValue(value.resultSummary)
+    };
+}
+function parseSender(value) {
+    try {
+        const parsed = JSON.parse(value);
+        return isRecord(parsed) ? parsed : {};
+    }
+    catch {
+        return {};
+    }
+}
+function sqlValue(value) {
+    if (value === undefined || value === null)
+        return "null";
+    return `'${value.replaceAll("'", "''")}'`;
+}
+function sqlNumber(value) {
+    return value === undefined ? "null" : String(value);
+}
+function positiveInteger(value) {
+    return Number.isInteger(value) && Number(value) > 0;
+}
+function commandState(value) {
+    return value === "pending" || value === "in_progress" || value === "done" || value === "failed"
+        ? value
+        : undefined;
+}
+function stringValue(value) {
+    return typeof value === "string" ? value : undefined;
+}
+function numberValue(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+function isRecord(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 function isNodeError(error) {
     return error instanceof Error && "code" in error;

@@ -240,6 +240,100 @@ test("listener deduplicates control commands by message id", async () => {
   }
 });
 
+test("listener enqueues normal commands with an immutable Codex session snapshot", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-session-"));
+  const queuePath = join(dir, "commands.db");
+  const client = new FakeFeishuClient();
+  let wokenSessionId: string | undefined;
+  const listener = new FeishuCommandListener({
+    onCommandEnqueued: (command) => {
+      wokenSessionId = command.sessionId;
+    }
+  });
+  try {
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        sessionId: "session_new",
+        sessionTitle: "最新会话",
+        sessionSource: "vscode",
+        sessionGitBranch: "main",
+        sessionUpdatedAt: 2000,
+        cwd: "/tmp/new"
+      }
+    };
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> 继续执行下一步"
+      }),
+      mentions: [
+        {
+          key: "@_user_1",
+          id: { open_id: "ou_bot" },
+          name: "Agent"
+        }
+      ]
+    }), config, client);
+
+    const commands = await listCommands(queuePath);
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].sessionId, "session_new");
+    assert.equal(commands[0].sessionTitle, "最新会话");
+    assert.equal(commands[0].sessionCwd, "/tmp/new");
+    assert.equal(wokenSessionId, "session_new");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener rejects normal commands until a Codex session is selected", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-nosession-"));
+  const queuePath = join(dir, "commands.db");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener();
+  try {
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      }
+    };
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> 继续执行下一步"
+      }),
+      mentions: [
+        {
+          key: "@_user_1",
+          id: { open_id: "ou_bot" },
+          name: "Agent"
+        }
+      ]
+    }), config, client);
+
+    assert.equal((await listCommands(queuePath)).length, 0);
+    assert.equal(client.texts.length, 1);
+    assert.match(client.texts[0].text, /请先发送 list-session/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("listener reloads config before handling session control commands", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-inbound-reload-"));
   const queuePath = join(dir, "commands.json");

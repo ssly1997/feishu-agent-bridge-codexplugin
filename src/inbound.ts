@@ -12,12 +12,11 @@ import {
   parseCodexSessionControlCommand
 } from "./codexSessions.js";
 import { FeishuClient } from "./feishuClient.js";
-import type { FeishuChatMessage } from "./feishuClient.js";
 import {
   buildCodexSessionListCard,
   parseSelectSessionActionValue
 } from "./sessionCard.js";
-import type { BridgeConfig, NewAgentCommand } from "./types.js";
+import type { AgentCommand, BridgeConfig, NewAgentCommand } from "./types.js";
 
 export type MessageReceiveEvent = Parameters<
   NonNullable<EventHandles["im.message.receive_v1"]>
@@ -26,8 +25,13 @@ export type NormalizedCardActionEvent = NonNullable<
   ReturnType<typeof lark.normalizeCardAction>
 >;
 
+type ExtractedAgentCommand = Omit<
+  NewAgentCommand,
+  "sessionId" | "sessionTitle" | "sessionCwd" | "sessionSource" | "sessionGitBranch" | "sessionUpdatedAt"
+>;
+
 export interface CommandExtractionResult {
-  command?: NewAgentCommand;
+  command?: ExtractedAgentCommand;
   ignoredReason?: string;
 }
 
@@ -50,9 +54,6 @@ export interface CommandListenerStatus {
 
 export class FeishuCommandListener {
   private wsClient?: lark.WSClient;
-  private pollTimer?: NodeJS.Timeout;
-  private pollStartedAtMs = 0;
-  private readonly polledMessageIds = new Set<string>();
   private readonly handledMessageIds = new Set<string>();
   private queuePath?: string;
   private startedAt?: string;
@@ -67,6 +68,7 @@ export class FeishuCommandListener {
     private readonly options: {
       configPath?: string;
       feishuClient?: FeishuClient;
+      onCommandEnqueued?: (command: AgentCommand) => void | Promise<void>;
     } = {}
   ) {}
 
@@ -126,15 +128,10 @@ export class FeishuCommandListener {
     });
 
     await this.wsClient.start({ eventDispatcher });
-    this.startPolling(config, feishuClient);
     return this.getStatus();
   }
 
   stop(force = false): void {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = undefined;
-    }
     if (!this.wsClient) return;
     this.wsClient.close({ force });
     this.wsClient = undefined;
@@ -264,7 +261,35 @@ export class FeishuCommandListener {
       }
 
       const queuePath = resolveCommandQueuePath(config);
-      const { command, inserted } = await enqueueCommand(extracted.command, queuePath);
+      const session = commandSessionFromConfig(config);
+      if (!session) {
+        this.ignoredCount += 1;
+        await feishuClient.sendTextMessage(
+          config,
+          {
+            receiveIdType: "chat_id",
+            receiveId: extracted.command.chatId
+          },
+          "请先发送 list-session 选择一个 Codex 会话，或使用 switch-session <序号|sessionId> 介入指定会话。"
+        );
+        stderrLogger.info(
+          "[inbound]",
+          "ignored command without selected session",
+          JSON.stringify({
+            messageId: extracted.command.messageId,
+            chatId: extracted.command.chatId
+          })
+        );
+        return;
+      }
+
+      const { command, inserted } = await enqueueCommand(
+        {
+          ...extracted.command,
+          ...session
+        },
+        queuePath
+      );
       stderrLogger.info(
         "[inbound]",
         inserted ? "enqueued command" : "duplicate command",
@@ -278,6 +303,7 @@ export class FeishuCommandListener {
       if (inserted) {
         this.enqueuedCount += 1;
         this.lastCommandAt = new Date().toISOString();
+        await this.options.onCommandEnqueued?.(command);
       }
 
       if (inserted && config.inbound.acknowledgeOnReceive) {
@@ -384,61 +410,6 @@ export class FeishuCommandListener {
     }
   }
 
-  private startPolling(config: BridgeConfig, feishuClient: FeishuClient): void {
-    if (!config.inbound.pollingEnabled || config.receiveIdType !== "chat_id" || !config.receiveId) {
-      return;
-    }
-
-    this.pollStartedAtMs = Date.now();
-    const intervalMs = config.inbound.pollIntervalSeconds * 1000;
-    stderrLogger.info(
-      "[poll]",
-      "started message polling fallback",
-      JSON.stringify({
-        chatId: config.receiveId,
-        intervalSeconds: config.inbound.pollIntervalSeconds
-      })
-    );
-
-    const poll = async () => {
-      try {
-        await this.pollChatMessages(await this.loadRuntimeConfig(config), feishuClient);
-      } catch (error) {
-        this.lastError = formatError(error);
-        stderrLogger.error("[poll]", "failed to poll messages", this.lastError);
-      }
-    };
-
-    void poll();
-    this.pollTimer = setInterval(() => {
-      void poll();
-    }, intervalMs);
-  }
-
-  private async pollChatMessages(config: BridgeConfig, feishuClient: FeishuClient): Promise<void> {
-    const chatId = config.receiveId;
-    if (!chatId) return;
-
-    const messages = await feishuClient.listChatMessages(config, chatId, { pageSize: 20 });
-    for (const message of messages.slice().reverse()) {
-      if (this.polledMessageIds.has(message.messageId)) {
-        continue;
-      }
-      this.polledMessageIds.add(message.messageId);
-
-      const createdAtMs = Number(message.createTime);
-      if (Number.isFinite(createdAtMs) && createdAtMs <= this.pollStartedAtMs) {
-        continue;
-      }
-
-      if (message.sender?.sender_type === "app") {
-        continue;
-      }
-
-      await this.handleMessageReceive(polledMessageToEvent(message), config, feishuClient);
-    }
-  }
-
   private async loadRuntimeConfig(fallback: BridgeConfig): Promise<BridgeConfig> {
     const configPath = this.options.configPath;
     if (!configPath) return fallback;
@@ -455,6 +426,7 @@ export class FeishuCommandListener {
 export async function startCommandListener(options: {
   configPath?: string;
   feishuClient?: FeishuClient;
+  onCommandEnqueued?: (command: AgentCommand) => void | Promise<void>;
 } = {}): Promise<FeishuCommandListener> {
   const listener = new FeishuCommandListener({
     ...options,
@@ -594,6 +566,21 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function commandSessionFromConfig(config: BridgeConfig): Pick<
+  NewAgentCommand,
+  "sessionId" | "sessionTitle" | "sessionCwd" | "sessionSource" | "sessionGitBranch" | "sessionUpdatedAt"
+> | undefined {
+  if (!config.codex.enabled || !config.codex.sessionId) return undefined;
+  return {
+    sessionId: config.codex.sessionId,
+    sessionTitle: config.codex.sessionTitle,
+    sessionCwd: config.codex.cwd,
+    sessionSource: config.codex.sessionSource,
+    sessionGitBranch: config.codex.sessionGitBranch,
+    sessionUpdatedAt: config.codex.sessionUpdatedAt
+  };
+}
+
 function formatError(error: unknown): string {
   if (error instanceof Error) {
     return `${error.name}: ${error.message}`;
@@ -603,41 +590,6 @@ function formatError(error: unknown): string {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function polledMessageToEvent(message: FeishuChatMessage): MessageReceiveEvent {
-  return {
-    event_id: `poll:${message.messageId}`,
-    create_time: message.createTime,
-    event_type: "im.message.receive_v1",
-    sender: {
-      sender_id: {
-        open_id: message.sender?.id_type === "open_id" ? message.sender.id : undefined,
-        user_id: message.sender?.id_type === "user_id" ? message.sender.id : undefined,
-        union_id: message.sender?.id_type === "union_id" ? message.sender.id : undefined
-      },
-      sender_type: message.sender?.sender_type ?? "user",
-      tenant_key: message.sender?.tenant_key
-    },
-    message: {
-      message_id: message.messageId,
-      create_time: message.createTime ?? "",
-      chat_id: message.chatId,
-      chat_type: message.chatType ?? "group",
-      message_type: message.messageType,
-      content: message.content,
-      mentions: message.mentions?.map((mention) => ({
-        key: mention.key ?? "",
-        id: {
-          open_id: mention.id_type === "open_id" ? mention.id : undefined,
-          user_id: mention.id_type === "user_id" ? mention.id : undefined,
-          union_id: mention.id_type === "union_id" ? mention.id : undefined
-        },
-        name: mention.name ?? "",
-        tenant_key: mention.tenant_key
-      }))
-    }
-  };
 }
 
 const stderrLogger = {

@@ -13,9 +13,7 @@ export const DEFAULT_CONFIG = {
         mode: "long_connection",
         requireMention: true,
         acknowledgeOnReceive: true,
-        acknowledgementText: "收到，已加入 Agent 队列。",
-        pollingEnabled: false,
-        pollIntervalSeconds: 600
+        acknowledgementText: "收到，已加入 Agent 队列。"
     },
     codex: {
         enabled: false,
@@ -24,7 +22,8 @@ export const DEFAULT_CONFIG = {
         useLast: false,
         extraArgs: ["--skip-git-repo-check"],
         timeoutMs: 30 * 60 * 1000,
-        pollIntervalSeconds: 5,
+        inProgressTimeoutMs: 60 * 60 * 1000,
+        inProgressRecovery: "mark_failed",
         sessionListLimit: 10,
         outputMaxBytes: 12000,
         notifyResult: true
@@ -42,6 +41,10 @@ const codexApprovalPolicies = new Set([
     "on-request",
     "on-failure",
     "never"
+]);
+const codexInProgressRecoveries = new Set([
+    "mark_failed",
+    "reset_pending"
 ]);
 export class ConfigError extends Error {
     constructor(message) {
@@ -181,15 +184,7 @@ function validateInboundConfig(config, configPath) {
             throw new ConfigError(`inbound.${key} must be a boolean in ${configPath}`);
         }
     }
-    if (typeof config.pollingEnabled !== "boolean") {
-        throw new ConfigError(`inbound.pollingEnabled must be a boolean in ${configPath}`);
-    }
-    if (typeof config.pollIntervalSeconds !== "number" ||
-        !Number.isFinite(config.pollIntervalSeconds) ||
-        config.pollIntervalSeconds < 1) {
-        throw new ConfigError(`inbound.pollIntervalSeconds must be a number >= 1 in ${configPath}`);
-    }
-    for (const key of ["queuePath", "botOpenId", "acknowledgementText"]) {
+    for (const key of ["queuePath", "queueDbPath", "botOpenId", "acknowledgementText"]) {
         if (config[key] !== undefined && typeof config[key] !== "string") {
             throw new ConfigError(`inbound.${key} must be a string in ${configPath}`);
         }
@@ -228,7 +223,7 @@ function validateCodexConfig(config, configPath) {
     }
     for (const key of [
         "timeoutMs",
-        "pollIntervalSeconds",
+        "inProgressTimeoutMs",
         "sessionListLimit",
         "outputMaxBytes"
     ]) {
@@ -237,6 +232,9 @@ function validateCodexConfig(config, configPath) {
             config[key] < 1) {
             throw new ConfigError(`codex.${key} must be a number >= 1 in ${configPath}`);
         }
+    }
+    if (!codexInProgressRecoveries.has(config.inProgressRecovery)) {
+        throw new ConfigError(`codex.inProgressRecovery must be one of: ${Array.from(codexInProgressRecoveries).join(", ")}`);
     }
     if (config.sessionUpdatedAt !== undefined &&
         (typeof config.sessionUpdatedAt !== "number" ||
@@ -261,14 +259,13 @@ function sanitizeInboundConfig(config) {
         enabled: config.enabled,
         mode: config.mode,
         queuePath: config.queuePath,
+        queueDbPath: config.queueDbPath,
         requireMention: config.requireMention,
         botOpenId: mask(config.botOpenId),
         allowedChatIds: config.allowedChatIds?.map(mask),
         allowedOpenIds: config.allowedOpenIds?.map(mask),
         acknowledgeOnReceive: config.acknowledgeOnReceive,
-        acknowledgementText: config.acknowledgementText,
-        pollingEnabled: config.pollingEnabled,
-        pollIntervalSeconds: config.pollIntervalSeconds
+        acknowledgementText: config.acknowledgementText
     };
 }
 function sanitizeCodexConfig(config) {
@@ -290,7 +287,8 @@ function sanitizeCodexConfig(config) {
         approvalPolicy: config.approvalPolicy,
         extraArgs: config.extraArgs,
         timeoutMs: config.timeoutMs,
-        pollIntervalSeconds: config.pollIntervalSeconds,
+        inProgressTimeoutMs: config.inProgressTimeoutMs,
+        inProgressRecovery: config.inProgressRecovery,
         sessionListLimit: config.sessionListLimit,
         outputMaxBytes: config.outputMaxBytes,
         notifyResult: config.notifyResult

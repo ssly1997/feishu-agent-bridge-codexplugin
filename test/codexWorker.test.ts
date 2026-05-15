@@ -34,7 +34,7 @@ test("processNextCodexCommand resumes Codex CLI, acks queue, and notifies Feishu
   const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-"));
   const scriptPath = join(dir, "fake-codex.mjs");
   const configPath = join(dir, "config.json");
-  const queuePath = join(dir, "commands.json");
+  const queuePath = join(dir, "commands.db");
   const outputDir = join(dir, "codex-output");
   const client = new FakeFeishuClient();
   try {
@@ -62,7 +62,7 @@ writeFileSync(outputPath, "Codex handled: " + prompt);
         inbound: {
           ...DEFAULT_CONFIG.inbound,
           enabled: true,
-          queuePath
+          queueDbPath: queuePath
         },
         codex: {
           ...DEFAULT_CONFIG.codex,
@@ -84,7 +84,10 @@ writeFileSync(outputPath, "Codex handled: " + prompt);
         chatId: "oc_1",
         chatType: "group",
         sender: { openId: "ou_user" },
-        createdAt: "1710000000000"
+        createdAt: "1710000000000",
+        sessionId: "session_1",
+        sessionTitle: "Session 1",
+        sessionCwd: dir
       },
       queuePath
     );
@@ -124,14 +127,14 @@ test("buildFeishuCommandPrompt tells resumed Codex not to send Feishu messages i
   });
 
   assert.match(prompt, /不要调用 feishu_notify/);
-  assert.match(prompt, /外层 feishu-agent-bridge worker 会自动/);
+  assert.match(prompt, /外层 feishu-agent-bridge runtime 会自动/);
   assert.match(prompt, /回我一条消息，带代码块/);
 });
 
 test("processNextCodexCommand handles list-session without running Codex CLI", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-"));
   const configPath = join(dir, "config.json");
-  const queuePath = join(dir, "commands.json");
+  const queuePath = join(dir, "commands.db");
   const dbPath = join(dir, "state.sqlite");
   const client = new FakeFeishuClient();
   try {
@@ -147,7 +150,7 @@ test("processNextCodexCommand handles list-session without running Codex CLI", a
         inbound: {
           ...DEFAULT_CONFIG.inbound,
           enabled: true,
-          queuePath
+          queueDbPath: queuePath
         },
         codex: {
           ...DEFAULT_CONFIG.codex,
@@ -166,7 +169,10 @@ test("processNextCodexCommand handles list-session without running Codex CLI", a
         chatId: "oc_1",
         chatType: "group",
         sender: { openId: "ou_user" },
-        createdAt: "1710000000000"
+        createdAt: "1710000000000",
+        sessionId: "session_new",
+        sessionTitle: "最新会话",
+        sessionCwd: "/tmp/new"
       },
       queuePath
     );
@@ -187,7 +193,7 @@ test("processNextCodexCommand handles list-session without running Codex CLI", a
 test("processNextCodexCommand handles current-session without running Codex CLI", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-"));
   const configPath = join(dir, "config.json");
-  const queuePath = join(dir, "commands.json");
+  const queuePath = join(dir, "commands.db");
   const dbPath = join(dir, "state.sqlite");
   const client = new FakeFeishuClient();
   try {
@@ -203,7 +209,7 @@ test("processNextCodexCommand handles current-session without running Codex CLI"
         inbound: {
           ...DEFAULT_CONFIG.inbound,
           enabled: true,
-          queuePath
+          queueDbPath: queuePath
         },
         codex: {
           ...DEFAULT_CONFIG.codex,
@@ -224,7 +230,10 @@ test("processNextCodexCommand handles current-session without running Codex CLI"
         chatId: "oc_1",
         chatType: "group",
         sender: { openId: "ou_user" },
-        createdAt: "1710000000000"
+        createdAt: "1710000000000",
+        sessionId: "session_new",
+        sessionTitle: "最新会话",
+        sessionCwd: "/tmp/new"
       },
       queuePath
     );
@@ -245,7 +254,7 @@ test("processNextCodexCommand handles current-session without running Codex CLI"
 test("processNextCodexCommand selects a session with list-session index", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-"));
   const configPath = join(dir, "config.json");
-  const queuePath = join(dir, "commands.json");
+  const queuePath = join(dir, "commands.db");
   const dbPath = join(dir, "state.sqlite");
   const client = new FakeFeishuClient();
   try {
@@ -261,7 +270,7 @@ test("processNextCodexCommand selects a session with list-session index", async 
         inbound: {
           ...DEFAULT_CONFIG.inbound,
           enabled: true,
-          queuePath
+          queueDbPath: queuePath
         },
         codex: {
           ...DEFAULT_CONFIG.codex,
@@ -280,7 +289,10 @@ test("processNextCodexCommand selects a session with list-session index", async 
         chatId: "oc_1",
         chatType: "group",
         sender: { openId: "ou_user" },
-        createdAt: "1710000000000"
+        createdAt: "1710000000000",
+        sessionId: "session_new",
+        sessionTitle: "最新会话",
+        sessionCwd: "/tmp/new"
       },
       queuePath
     );
@@ -303,7 +315,7 @@ test("processNextCodexCommand selects a session with list-session index", async 
 test("processNextCodexCommand reports no-op when there is no pending command", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-"));
   const configPath = join(dir, "config.json");
-  const queuePath = join(dir, "commands.json");
+  const queuePath = join(dir, "commands.db");
   try {
     await writeFile(
       configPath,
@@ -311,7 +323,7 @@ test("processNextCodexCommand reports no-op when there is no pending command", a
         ...DEFAULT_CONFIG,
         inbound: {
           ...DEFAULT_CONFIG.inbound,
-          queuePath
+          queueDbPath: queuePath
         }
       }),
       "utf8"
@@ -329,7 +341,7 @@ test("processNextCodexCommand reports no-op when there is no pending command", a
 test("processNextCodexCommand fails normal commands when codex adapter is disabled", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-"));
   const configPath = join(dir, "config.json");
-  const queuePath = join(dir, "commands.json");
+  const queuePath = join(dir, "commands.db");
   const client = new FakeFeishuClient();
   try {
     await writeFile(
@@ -342,7 +354,7 @@ test("processNextCodexCommand fails normal commands when codex adapter is disabl
         enabled: true,
         inbound: {
           ...DEFAULT_CONFIG.inbound,
-          queuePath
+          queueDbPath: queuePath
         }
       }),
       "utf8"
@@ -355,7 +367,9 @@ test("processNextCodexCommand fails normal commands when codex adapter is disabl
         chatId: "oc_1",
         chatType: "group",
         sender: { openId: "ou_user" },
-        createdAt: "1710000000000"
+        createdAt: "1710000000000",
+        sessionId: "session_1",
+        sessionTitle: "Session 1"
       },
       queuePath
     );

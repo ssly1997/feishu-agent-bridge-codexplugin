@@ -11,6 +11,8 @@ test("buildNotificationCard creates a Feishu interactive card payload", () => {
       status: "success",
       summary: "All checks passed.\n\n```bash\ncorepack pnpm test\n```",
       cwd: "/tmp/project",
+      codexSessionId: "019e249d-96bd-75d3-b604-16a0198a4649",
+      codexSessionTitle: "Build investigation",
       artifacts: ["/tmp/project/report.txt"],
       links: [{ label: "Run", url: "https://example.com/run/1" }],
       nextSteps: ["Ship it"],
@@ -20,8 +22,8 @@ test("buildNotificationCard creates a Feishu interactive card payload", () => {
       ...DEFAULT_CONFIG,
       codex: {
         ...DEFAULT_CONFIG.codex,
-        sessionId: "019e249d-96bd-75d3-b604-16a0198a4649",
-        sessionTitle: "Build investigation"
+        sessionId: "019e2142-8030-7353-bb1b-0f11ad3e82fb",
+        sessionTitle: "Wrong configured session"
       }
     }
   );
@@ -33,6 +35,7 @@ test("buildNotificationCard creates a Feishu interactive card payload", () => {
   assert.ok(card.body.elements.length >= 6);
   assert.match(JSON.stringify(card), /Project.*project/);
   assert.match(JSON.stringify(card), /Codex session.*Build investigation.*#019e249d/);
+  assert.doesNotMatch(JSON.stringify(card), /Wrong configured session/);
   assert.doesNotMatch(JSON.stringify(card), /019e249d-96bd-75d3-b604-16a0198a4649/);
   assert.match(JSON.stringify(card), /All checks passed/);
   assert.match(JSON.stringify(card), /https:\/\/example.com\/run\/1/);
@@ -68,6 +71,32 @@ test("buildNotificationCard falls back to configured Codex context", () => {
   assert.match(text, /Codex session.*#019e249d/);
   assert.doesNotMatch(text, /019e249d-96bd-75d3-b604-16a0198a4649/);
   assert.match(text, /\/Users\/example\/work\/project-a/);
+});
+
+
+test("buildNotificationCard can avoid configured Codex session for manual notifications", () => {
+  const card = buildNotificationCard(
+    {
+      title: "Manual notify",
+      summary: "Manual task result.",
+      cwd: "/Users/example/work/plugin"
+    },
+    {
+      ...DEFAULT_CONFIG,
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        sessionId: "019e2142-8030-7353-bb1b-0f11ad3e82fb",
+        sessionTitle: "看一下 live-socket mcp能识别到了吗"
+      }
+    },
+    { useConfiguredCodexSession: false }
+  );
+
+  const text = JSON.stringify(card);
+  assert.match(text, /Project.*plugin/);
+  assert.match(text, /Codex session.*\(unbound\)/);
+  assert.doesNotMatch(text, /live-socket/);
+  assert.doesNotMatch(text, /#019e2142/);
 });
 
 test("normalizeStatus falls back to info for unknown values", () => {

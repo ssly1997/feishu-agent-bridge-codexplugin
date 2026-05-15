@@ -15,6 +15,10 @@ console.log("MCP smoke passed");
 async function runSmoke(mode) {
   const child = spawn(process.execPath, [entry], {
     cwd: root,
+    env: {
+      ...process.env,
+      FEISHU_AGENT_BRIDGE_SKIP_RUNTIME_AUTOSTART: "1"
+    },
     stdio: ["pipe", "pipe", "inherit"]
   });
 

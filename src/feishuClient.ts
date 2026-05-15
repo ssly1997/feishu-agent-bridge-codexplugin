@@ -22,53 +22,6 @@ interface MessageResponse {
   };
 }
 
-interface MessageListResponse {
-  code: number;
-  msg?: string;
-  data?: {
-    items?: RawFeishuMessage[];
-  };
-}
-
-interface RawFeishuMessage {
-  message_id: string;
-  create_time?: string;
-  chat_id?: string;
-  chat_type?: string;
-  msg_type?: string;
-  message_type?: string;
-  body?: {
-    content?: string;
-  };
-  content?: string;
-  mentions?: RawFeishuMention[];
-  sender?: {
-    id?: string;
-    id_type?: string;
-    sender_type?: string;
-    tenant_key?: string;
-  };
-}
-
-interface RawFeishuMention {
-  id?: string;
-  id_type?: string;
-  key?: string;
-  name?: string;
-  tenant_key?: string;
-}
-
-export interface FeishuChatMessage {
-  messageId: string;
-  createTime?: string;
-  chatId: string;
-  chatType?: string;
-  messageType: string;
-  content: string;
-  mentions?: RawFeishuMention[];
-  sender?: RawFeishuMessage["sender"];
-}
-
 export class FeishuApiError extends Error {
   readonly code?: number;
   readonly status?: number;
@@ -144,41 +97,6 @@ export class FeishuClient {
       msgType: "text",
       content: { text }
     });
-  }
-
-  async listChatMessages(
-    config: BridgeConfig,
-    chatId: string,
-    options: { pageSize?: number } = {}
-  ): Promise<FeishuChatMessage[]> {
-    assertAppCredentialsReady(config);
-    const token = await this.getTenantAccessToken(config);
-    const url = new URL(`${this.baseUrl}/im/v1/messages`);
-    url.searchParams.set("container_id_type", "chat");
-    url.searchParams.set("container_id", chatId);
-    url.searchParams.set("sort_type", "ByCreateTimeDesc");
-    url.searchParams.set("page_size", String(options.pageSize ?? 20));
-
-    const response = await this.getJson<MessageListResponse>(url.toString(), {
-      Authorization: `Bearer ${token}`
-    });
-
-    if (response.code !== 0) {
-      throw new FeishuApiError(`Feishu list messages failed: ${response.msg || "unknown error"}`, {
-        code: response.code
-      });
-    }
-
-    return (response.data?.items ?? []).map((item) => ({
-      messageId: item.message_id,
-      createTime: item.create_time,
-      chatId: item.chat_id ?? chatId,
-      chatType: item.chat_type,
-      messageType: item.msg_type ?? item.message_type ?? "",
-      content: item.body?.content ?? item.content ?? "",
-      mentions: item.mentions,
-      sender: item.sender
-    }));
   }
 
   private async sendMessage(

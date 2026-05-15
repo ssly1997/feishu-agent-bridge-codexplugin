@@ -54,33 +54,6 @@ export class FeishuClient {
             content: { text }
         });
     }
-    async listChatMessages(config, chatId, options = {}) {
-        assertAppCredentialsReady(config);
-        const token = await this.getTenantAccessToken(config);
-        const url = new URL(`${this.baseUrl}/im/v1/messages`);
-        url.searchParams.set("container_id_type", "chat");
-        url.searchParams.set("container_id", chatId);
-        url.searchParams.set("sort_type", "ByCreateTimeDesc");
-        url.searchParams.set("page_size", String(options.pageSize ?? 20));
-        const response = await this.getJson(url.toString(), {
-            Authorization: `Bearer ${token}`
-        });
-        if (response.code !== 0) {
-            throw new FeishuApiError(`Feishu list messages failed: ${response.msg || "unknown error"}`, {
-                code: response.code
-            });
-        }
-        return (response.data?.items ?? []).map((item) => ({
-            messageId: item.message_id,
-            createTime: item.create_time,
-            chatId: item.chat_id ?? chatId,
-            chatType: item.chat_type,
-            messageType: item.msg_type ?? item.message_type ?? "",
-            content: item.body?.content ?? item.content ?? "",
-            mentions: item.mentions,
-            sender: item.sender
-        }));
-    }
     async sendMessage(config, input) {
         assertAppCredentialsReady(config);
         const token = await this.getTenantAccessToken(config);

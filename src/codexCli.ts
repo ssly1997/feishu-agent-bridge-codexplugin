@@ -99,12 +99,15 @@ export async function runCodexResume(
 }
 
 export function buildCodexResumeArgs(config: CodexCliConfig, outputPath: string): string[] {
-  const args = ["exec", "resume", "--json", "-o", outputPath];
+  const args = ["exec"];
 
   if (config.model) args.push("--model", config.model);
   if (config.profile) args.push("--profile", config.profile);
   if (config.sandbox) args.push("--sandbox", config.sandbox);
   if (config.approvalPolicy) args.push("--ask-for-approval", config.approvalPolicy);
+
+  args.push("resume", "--json", "-o", outputPath);
+
   if (config.extraArgs) args.push(...config.extraArgs);
 
   if (config.sessionId) {

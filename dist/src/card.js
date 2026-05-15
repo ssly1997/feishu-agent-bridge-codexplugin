@@ -2,7 +2,7 @@ import { basename } from "node:path";
 const MAX_SUMMARY_LENGTH = 2800;
 const MAX_ITEM_LENGTH = 500;
 const MAX_ITEMS = 10;
-export function buildNotificationCard(input, config) {
+export function buildNotificationCard(input, config, options = {}) {
     const status = normalizeStatus(input.status);
     const title = truncate(input.title || config.defaultTitle, 80);
     const effectiveCwd = input.cwd || config.codex.cwd;
@@ -11,7 +11,7 @@ export function buildNotificationCard(input, config) {
         `**Status:** ${escapeMarkdownValue(statusLabel(status))}`,
         `**Source:** ${escapeMarkdownValue(input.source || "agent")}`,
         `**Project:** ${escapeMarkdownValue(projectLabel(effectiveCwd))}`,
-        `**Codex session:** ${escapeMarkdownValue(sessionLabel(config))}`
+        `**Codex session:** ${escapeMarkdownValue(sessionLabel(input, config, options.useConfiguredCodexSession ?? true))}`
     ].join("\n")));
     elements.push({ tag: "hr" });
     elements.push(sectionBlock("Summary", truncate(input.summary, MAX_SUMMARY_LENGTH)));
@@ -109,7 +109,17 @@ function projectLabel(cwd) {
         return "(unknown)";
     return basename(cwd) || cwd;
 }
-function sessionLabel(config) {
+function sessionLabel(input, config, useConfiguredCodexSession) {
+    if (input.codexSessionLabel)
+        return input.codexSessionLabel;
+    if (input.codexSessionTitle) {
+        const suffix = input.codexSessionId ? ` (#${shortSessionId(input.codexSessionId)})` : "";
+        return `${input.codexSessionTitle}${suffix}`;
+    }
+    if (input.codexSessionId)
+        return `#${shortSessionId(input.codexSessionId)}`;
+    if (!useConfiguredCodexSession)
+        return "(unbound)";
     if (config.codex.sessionTitle) {
         const suffix = config.codex.sessionId ? ` (#${shortSessionId(config.codex.sessionId)})` : "";
         return `${config.codex.sessionTitle}${suffix}`;

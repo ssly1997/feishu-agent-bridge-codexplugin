@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { setTimeout as delay } from "node:timers/promises";
 import { CONFIG_PATH } from "./config.js";
 import { processNextCodexCommand } from "./codexWorker.js";
 
@@ -11,25 +10,15 @@ interface CliOptions {
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
-  if (!options.watch) {
-    const result = await processNextCodexCommand({ configPath: options.configPath });
-    console.log(JSON.stringify(result, null, 2));
-    process.exitCode = result.processed && result.ackState === "failed" ? 1 : 0;
+  if (options.watch) {
+    console.error("--watch is deprecated. Use `pnpm runtime` / `node dist/src/runtime.js` for push-driven scheduling.");
+    process.exitCode = 1;
     return;
   }
 
-  console.log(
-    JSON.stringify({
-      event: "worker_started",
-      configPath: options.configPath
-    })
-  );
-
-  while (true) {
-    const result = await processNextCodexCommand({ configPath: options.configPath });
-    console.log(JSON.stringify({ event: "tick", ...result }));
-    await delay(result.pollIntervalSeconds * 1000);
-  }
+  const result = await processNextCodexCommand({ configPath: options.configPath });
+  console.log(JSON.stringify(result, null, 2));
+  process.exitCode = result.processed && result.ackState === "failed" ? 1 : 0;
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -75,7 +64,7 @@ Consume Feishu Agent Bridge commands and continue a Codex CLI session with:
 
 Options:
   --once         Process at most one pending command, then exit. Default.
-  --watch        Keep polling the local command queue.
+  --watch        Deprecated. Use fab-runtime instead.
   --config PATH  Bridge config path. Default: ${CONFIG_PATH}
 `);
 }

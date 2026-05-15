@@ -3,6 +3,7 @@ import { cp, lstat, mkdir, readFile, rm, symlink, writeFile } from "node:fs/prom
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 
 const pluginName = "feishu-agent-bridge";
 const marketplaceName = "local";
@@ -24,6 +25,7 @@ const marketplacePath = join(home, ".agents", "plugins", "marketplace.json");
 const codexConfigPath = join(home, ".codex", "config.toml");
 const bridgeConfigPath = join(home, ".feishu-agent-bridge", "config.json");
 const dryRun = process.argv.includes("--dry-run");
+const noStartRuntime = process.argv.includes("--no-start-runtime");
 
 const entry = {
   name: pluginName,
@@ -62,6 +64,7 @@ if (dryRun) {
         pluginCachePath,
         pluginVersion,
         bridgeConfigPath,
+        runtimeAutostart: !noStartRuntime,
         marketplaceEntry: entry,
         action: index >= 0 ? "update" : "append"
       },
@@ -86,7 +89,10 @@ console.log(`Installed ${pluginName} plugin link: ${pluginLink}`);
 console.log(`Refreshed ${pluginName} plugin cache: ${pluginCachePath}`);
 console.log(`Updated marketplace: ${marketplacePath}`);
 console.log(`Updated Codex config: ${codexConfigPath}`);
-await warnIfPollingFallbackEnabled(bridgeConfigPath);
+await printRuntimeHint(bridgeConfigPath);
+if (!noStartRuntime) {
+  await ensureInstalledRuntime(pluginCachePath);
+}
 console.log("Restart Codex or refresh plugins after running corepack pnpm build.");
 
 async function loadPluginVersion(path) {
@@ -207,11 +213,15 @@ async function updateCodexConfig(path) {
   await writeFile(path, next, "utf8");
 }
 
-async function warnIfPollingFallbackEnabled(path) {
+async function printRuntimeHint(path) {
   let raw;
   try {
     raw = await readFile(path, "utf8");
   } catch {
+    console.log(
+      "[feishu-agent-bridge] Create ~/.feishu-agent-bridge/config.json with inbound.enabled=true; " +
+        "the plugin will autostart fab-runtime on the next install or Codex plugin refresh."
+    );
     return;
   }
 
@@ -223,12 +233,38 @@ async function warnIfPollingFallbackEnabled(path) {
     return;
   }
 
-  if (parsed?.inbound?.pollingEnabled === true) {
-    console.warn(
-      `[feishu-agent-bridge] Warning: inbound.pollingEnabled is true in ${path}. ` +
-        "Long connection should be preferred; polling can replay recent Feishu messages. " +
-        "Set inbound.pollingEnabled to false unless you are actively debugging event delivery."
-    );
+  const enabled = parsed?.inbound?.enabled === true;
+  const queueDbPath = parsed?.inbound?.queueDbPath || "~/.feishu-agent-bridge/commands.db";
+  console.log(
+    `[feishu-agent-bridge] Inbound runtime ${enabled ? "is enabled" : "is disabled"} in ${path}. ` +
+      `Queue DB: ${queueDbPath}. Runtime autostart is ${enabled ? "eligible" : "skipped until inbound is enabled"}.`
+  );
+}
+
+async function ensureInstalledRuntime(path) {
+  const control = join(path, "scripts", "runtime-control.mjs");
+  try {
+    await lstat(control);
+  } catch {
+    console.warn(`[feishu-agent-bridge] Warning: missing runtime control script: ${control}`);
+    return;
+  }
+
+  const code = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [control, "restart"], {
+      cwd: path,
+      stdio: "inherit"
+    });
+    child.on("error", (error) => {
+      console.warn(`[feishu-agent-bridge] Warning: failed to start runtime control: ${error.message}`);
+      resolve(1);
+    });
+    child.on("exit", (exitCode) => {
+      resolve(exitCode ?? 1);
+    });
+  });
+  if (code !== 0) {
+    console.warn(`[feishu-agent-bridge] Warning: runtime autostart exited with code ${code}.`);
   }
 }
 

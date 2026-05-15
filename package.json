@@ -7,7 +7,8 @@
   "packageManager": "pnpm@8.15.9",
   "bin": {
     "feishu-agent-bridge": "./dist/src/index.js",
-    "feishu-agent-codex-worker": "./dist/src/codexWorkerCli.js"
+    "feishu-agent-codex-worker": "./dist/src/codexWorkerCli.js",
+    "fab-runtime": "./dist/src/runtime.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -15,11 +16,14 @@
     "smoke": "tsc -p tsconfig.json && node scripts/mcp-smoke.mjs",
     "smoke:plugin": "tsc -p tsconfig.json && node scripts/mcp-smoke.mjs scripts/codex-plugin-mcp.mjs",
     "start": "node dist/src/index.js",
-    "listen": "tsc -p tsconfig.json && node dist/src/listen.js",
+    "runtime": "tsc -p tsconfig.json && node dist/src/runtime.js",
+    "runtime:start": "node scripts/runtime-control.mjs start",
+    "runtime:stop": "node scripts/runtime-control.mjs stop",
+    "runtime:restart": "node scripts/runtime-control.mjs restart",
+    "runtime:status": "node scripts/runtime-control.mjs status",
     "codex:plugin:install": "node scripts/install-codex-plugin.mjs",
     "codex:plugin:dry-run": "node scripts/install-codex-plugin.mjs --dry-run",
-    "codex:once": "tsc -p tsconfig.json && node dist/src/codexWorkerCli.js --once",
-    "codex:worker": "tsc -p tsconfig.json && node dist/src/codexWorkerCli.js --watch"
+    "codex:once": "tsc -p tsconfig.json && node dist/src/codexWorkerCli.js --once"
   },
   "engines": {
     "node": ">=20.11"

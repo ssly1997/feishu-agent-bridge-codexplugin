@@ -62,7 +62,7 @@ export async function runCodexResume(prompt, config, options) {
     };
 }
 export function buildCodexResumeArgs(config, outputPath) {
-    const args = ["exec", "resume", "--json", "-o", outputPath];
+    const args = ["exec"];
     if (config.model)
         args.push("--model", config.model);
     if (config.profile)
@@ -71,6 +71,7 @@ export function buildCodexResumeArgs(config, outputPath) {
         args.push("--sandbox", config.sandbox);
     if (config.approvalPolicy)
         args.push("--ask-for-approval", config.approvalPolicy);
+    args.push("resume", "--json", "-o", outputPath);
     if (config.extraArgs)
         args.push(...config.extraArgs);
     if (config.sessionId) {

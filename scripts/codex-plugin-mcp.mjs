@@ -26,6 +26,7 @@ try {
 }
 
 await repairPnpmDependencyLinks(repoRoot);
+await ensureRuntimeSidecar(repoRoot);
 
 const child = spawn(process.execPath, [entry], {
   cwd: repoRoot,
@@ -49,6 +50,36 @@ child.on("exit", (code, signal) => {
   }
   process.exit(code ?? 1);
 });
+
+async function ensureRuntimeSidecar(root) {
+  if (process.env.FEISHU_AGENT_BRIDGE_SKIP_RUNTIME_AUTOSTART === "1") return;
+  const control = join(root, "scripts", "runtime-control.mjs");
+  try {
+    await access(control);
+  } catch {
+    return;
+  }
+
+  await new Promise((resolve) => {
+    const child = spawn(process.execPath, [control, "ensure", "--quiet"], {
+      cwd: root,
+      env: process.env,
+      stdio: ["ignore", "ignore", "inherit"]
+    });
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      resolve();
+    }, 5_000);
+    child.on("error", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    child.on("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
 
 async function repairPnpmDependencyLinks(root) {
   const packageJsonPath = join(root, "package.json");

@@ -9,8 +9,8 @@
 - 通过飞书自建应用机器人发送交互卡片通知。
 - 通过飞书长连接事件接收群聊里 @机器人的下一步指令。
 - 通过 stdio 暴露一组通用 MCP tools。
-- 使用本地 durable queue 保存飞书指令，Agent 可以通过 MCP 取指令、认领、确认完成。
-- 可选启动 Codex CLI worker，把飞书队列里的指令交给 `codex exec resume` 继续执行。
+- 使用本地 SQLite durable queue 保存飞书指令，按 Codex session 分区调度。
+- 可选启动独立 `fab-runtime`，把飞书长连接、入队、session 调度和 `codex exec resume` 串成一条常驻链路。
 - 飞书凭证保存在 `~/.feishu-agent-bridge/config.json`，不会放进项目仓库。
 - 内存缓存 `tenant_access_token`，并避免在输出中暴露 `appSecret` 或 token。
 
@@ -18,7 +18,7 @@
 
 - Node.js 20.11 或更新版本
 - pnpm
-- Codex CLI，可选，仅在启用 Codex CLI worker 时需要
+- Codex CLI，可选，仅在启用 `fab-runtime` 自动执行飞书指令时需要
 - 一个已开启机器人能力的飞书自建应用
 - 一个机器人可发送消息的目标群聊或用户
 
@@ -49,7 +49,7 @@ corepack pnpm build
 corepack pnpm codex:plugin:install
 ```
 
-安装脚本会把当前仓库软链到 `~/plugins/feishu-agent-bridge`，更新 `~/.agents/plugins/marketplace.json`，并在 `~/.codex/config.toml` 中注册本地 marketplace 与启用 `feishu-agent-bridge@local`。完成后重启 Codex，或在 Codex 里刷新插件列表。
+安装脚本会把当前仓库软链到 `~/plugins/feishu-agent-bridge`，更新 `~/.agents/plugins/marketplace.json`，并在 `~/.codex/config.toml` 中注册本地 marketplace 与启用 `feishu-agent-bridge@local`。如果 `~/.feishu-agent-bridge/config.json` 已存在且 `inbound.enabled=true`，安装脚本会自动清理旧 `fab-listener` / `fab-codex-worker` 并拉起单进程 `fab-runtime`。完成后重启 Codex，或在 Codex 里刷新插件列表。
 
 如果你之前已经在 `~/.codex/config.toml` 里手动配置过同名 `[mcp_servers.feishu-agent-bridge]`，启用插件前建议只保留一种接入方式，避免同一个 MCP server 被重复注册。
 
@@ -59,7 +59,13 @@ corepack pnpm codex:plugin:install
 corepack pnpm codex:plugin:dry-run
 ```
 
-插件化只负责把 MCP server 和 Skill 分发给 Codex；真实飞书凭证仍然只放在 `~/.feishu-agent-bridge/config.json`，不会进入插件包。
+插件包只分发 MCP server、Skill 和本地 runtime 代码；真实飞书凭证仍然只放在 `~/.feishu-agent-bridge/config.json`，不会进入插件包。只有本机配置明确打开 `inbound.enabled=true` 时，安装脚本或插件 MCP wrapper 才会自动拉起 `fab-runtime`。
+
+如果用户先安装插件、后创建本机配置，Codex 下次启动这个插件 MCP server 时也会幂等检查并自动启动 `fab-runtime`。不想自动拉起 runtime 时，可用：
+
+```bash
+corepack pnpm codex:plugin:install -- --no-start-runtime
+```
 
 创建本机私有配置：
 
@@ -77,14 +83,13 @@ cat > ~/.feishu-agent-bridge/config.json <<'JSON'
   "inbound": {
     "enabled": true,
     "mode": "long_connection",
+    "queueDbPath": "/Users/yourname/.feishu-agent-bridge/commands.db",
     "queuePath": "/Users/yourname/.feishu-agent-bridge/commands.json",
     "requireMention": true,
     "botOpenId": "ou_xxxxxxxxxxxxxxxx",
     "allowedChatIds": ["oc_xxxxxxxxxxxxxxxx"],
     "acknowledgeOnReceive": true,
-    "acknowledgementText": "收到，已加入 Agent 队列。",
-    "pollingEnabled": false,
-    "pollIntervalSeconds": 600
+    "acknowledgementText": "收到，已加入 Agent 队列。"
   },
   "codex": {
     "enabled": false,
@@ -97,7 +102,8 @@ cat > ~/.feishu-agent-bridge/config.json <<'JSON'
     "approvalPolicy": "never",
     "extraArgs": ["--skip-git-repo-check"],
     "timeoutMs": 1800000,
-    "pollIntervalSeconds": 5,
+    "inProgressTimeoutMs": 3600000,
+    "inProgressRecovery": "mark_failed",
     "sessionListLimit": 10,
     "outputDir": "/Users/yourname/.feishu-agent-bridge/codex-output",
     "outputMaxBytes": 12000,
@@ -111,9 +117,9 @@ JSON
 
 `inbound.botOpenId` 和 `inbound.allowedChatIds` 都是可选项，但建议至少配置 `allowedChatIds`，避免其它群里的 @ 消息进入本地 Agent 队列。
 
-`pollingEnabled` 默认建议保持 `false`。它只是排查长连接事件不通时的临时兜底：开启后 listener 会按 `pollIntervalSeconds` 拉取目标 `chat_id` 的最近消息。由于飞书消息列表接口可能返回最近历史消息，轮询兜底可能重新处理 `current-session`、`list-session` 这类控制消息，所以长连接已经可用时不要开启。
+`inbound.queueDbPath` 是新的 SQLite 队列文件，默认是 `~/.feishu-agent-bridge/commands.db`。`inbound.queuePath` 只作为旧版 `commands.json` 迁移来源保留；runtime 首次启动会导入旧历史，但之后不再写 JSON queue。
 
-`codex.sessionId` 是要继续的 Codex 会话 id。建议优先显式配置 session id；只有临时验证时才使用 `"useLast": true`。Codex CLI worker 继续的是同一份持久化会话历史，不保证实时注入当前打开的 Codex Desktop 窗口。
+`codex.sessionId` 是当前要介入的 Codex 会话 id。普通飞书指令入队时会把当时的 `sessionId`、`sessionTitle`、`cwd` 等信息固化到任务里；后续即使全局配置切到其它 session，已入队任务仍归属原 session。`fab-runtime` 不使用 `"useLast": true` 做多会话调度。
 
 如果还没有选定会话，可以先在飞书群里发送 `@机器人 list-session`。这是 listener 直接处理的控制命令，不会进入 Agent 任务队列；listener 会从 `codex.stateDbPath` 读取可用 Codex 会话，并返回带“介入”按钮的互动卡片。`@机器人 current-session`、`@机器人 list-session <序号>` 和 `@机器人 switch-session <序号>` 也是 listener 直处理命令，不应该回复“已加入 Agent 队列”。
 
@@ -121,19 +127,19 @@ JSON
 
 ## 长连接事件没有推送时的排查路径
 
-如果日志里只有 `ws client ready`，但飞书群里 @机器人 后队列里的 `eventId` 是 `poll:om_...`，说明当前消息是轮询兜底收到的，不是真正的长连接事件。
+本项目不再提供飞书消息 API 轮询兜底。普通指令必须来自飞书长连接 `im.message.receive_v1`；如果事件没有推送，需要修飞书开放平台事件配置，而不是打开本地轮询。
 
 本地侧先确认：
 
 ```bash
 tail -200 ~/.feishu-agent-bridge/listener.log
-cat ~/.feishu-agent-bridge/commands.json
+sqlite3 ~/.feishu-agent-bridge/commands.db 'select id,state,session_id,text from commands order by received_at desc limit 10;'
 ```
 
 判断标准：
 
-- 真正长连接推送：日志里会出现 SDK 的 `[ws] receive message...` 或本项目的 `[inbound] received message`，且 `eventId` 不是 `poll:` 前缀。
-- 轮询兜底：日志里有 `[poll] started message polling fallback`，队列里的 `eventId` 是 `poll:<message_id>`。
+- 真正长连接推送：日志里会出现 SDK 的 `[ws] receive message...` 或本项目的 `[inbound] received message`。
+- 如果日志只有 `ws client ready` 但没有 `[inbound] received message`，本地 websocket 连上了飞书网关，但开放平台还没有把消息事件推给这条连接。
 
 如果 API 能拉到群消息、但长连接没推事件，优先去飞书开放平台检查：
 
@@ -162,10 +168,10 @@ cat ~/.feishu-agent-bridge/commands.json
 - `feishu_send_test`：发送一条短测试消息，用于验证飞书配置。
 - `feishu_status`：查看本地配置就绪状态，敏感信息会被脱敏。
 - `feishu_set_enabled`：启用或关闭出站通知。
-- `feishu_command_status`：查看飞书入站指令队列和长连接 listener 状态。
-- `feishu_start_command_listener`：在当前 MCP server 进程内启动飞书长连接 listener。
-- `feishu_stop_command_listener`：停止当前 MCP server 进程内的 listener。
-- `feishu_next_command`：取下一条 pending 飞书指令，默认会认领为 `in_progress`。
+- `feishu_command_status`：查看飞书入站指令队列、session 分区统计和 runtime/listener 状态。
+- `feishu_start_command_listener`：返回独立 `fab-runtime` 启动指引；不再在 MCP server 进程内常驻 listener。
+- `feishu_stop_command_listener`：返回独立 `fab-runtime` 停止指引。
+- `feishu_next_command`：调试/外部 Agent 兼容入口，取下一条 pending 飞书指令，默认会认领为 `in_progress`。
 - `feishu_ack_command`：Agent 执行完成后把指令标记为 `done` 或 `failed`。
 - `feishu_list_commands`：查看本地队列中的指令。
 - `feishu_set_inbound_enabled`：启用或关闭飞书入站指令采集。
@@ -203,29 +209,39 @@ cat ~/.feishu-agent-bridge/commands.json
 - 「事件配置」和「回调配置」都使用长连接模式，本地机器不需要暴露公网 webhook。
 - 每次修改开放平台配置后都要创建并发布新版本，确认页面不再提示“版本发布后，当前修改方可生效”。
 
-本地启动长连接 listener：
+本地 runtime 默认会在插件安装或插件 MCP server 启动时自动 ensure。手动控制命令：
 
 ```bash
 cd feishu-agent-bridge-codexplugin
-pnpm listen
+pnpm runtime:status
+pnpm runtime:start
+pnpm runtime:restart
+pnpm runtime:stop
 ```
 
-也可以在 MCP client 里调用 `feishu_start_command_listener`，让 listener 跟 MCP server 进程一起跑。
+如果不用安装脚本，也可以直接临时运行：
 
-Agent 侧循环可以按这个顺序推进：
+```bash
+pnpm runtime
+```
+
+旧版 `fab-listener` + `fab-codex-worker` 双进程是迁移前形态。现在 `fab-runtime` 一个进程内同时负责长连接、SQLite 入队、session 调度和 Codex CLI 执行。
+
+`fab-runtime` 自动执行顺序：
 
 ```text
 1. 用户在飞书群里 @机器人：继续执行下一步
-2. listener 收到 `im.message.receive_v1`，把文本写入本地 commands queue
-3. Agent 调用 `feishu_next_command` 获取并认领指令
-4. Agent 执行用户的新指令
-5. Agent 调用 `feishu_ack_command` 标记 done/failed
-6. Agent 调用 `feishu_notify_task_result` 把执行结果发回飞书
+2. runtime 的 listener 收到 `im.message.receive_v1`
+3. runtime 把任务写入 SQLite，并固化当前 Codex session 归属
+4. runtime 唤醒该 session 的 runner
+5. 同一 session 串行执行；不同 session 可以并发执行
+6. runner 执行完成后立即取同 session 下一条 pending，直到该 session 队列为空
+7. runtime 根据 Codex CLI exit code 标记 done/failed，并把结果卡片发回飞书
 ```
 
-如果要让 Codex CLI 在无人操作时消费普通任务队列，可以启动本项目内置 worker。
+如果没有选定 Codex session，普通飞书指令不会入队，runtime 会提示先发送 `list-session` 或 `switch-session <序号|sessionId>`。
 
-## Codex CLI worker
+## Codex Runtime
 
 先确认本机 Codex CLI 支持 resume：
 
@@ -247,38 +263,22 @@ codex exec resume --help
     "sandbox": "workspace-write",
     "approvalPolicy": "never",
     "timeoutMs": 1800000,
-    "pollIntervalSeconds": 5,
+    "inProgressTimeoutMs": 3600000,
+    "inProgressRecovery": "mark_failed",
     "sessionListLimit": 10,
     "notifyResult": true
   }
 }
 ```
 
-处理一条 pending 指令后退出：
+调试时仍可手动处理一条 pending 指令后退出：
 
 ```bash
 cd feishu-agent-bridge-codexplugin
 pnpm codex:once
 ```
 
-持续轮询本地 queue：
-
-```bash
-cd feishu-agent-bridge-codexplugin
-pnpm codex:worker
-```
-
-worker 的执行顺序：
-
-```text
-1. 从 commands queue 认领下一条 pending 指令
-2. 通过 stdin 调用 `codex exec resume <sessionId> -`
-3. 用 `-o` 保存 Codex 最后一条回复到 `codex.outputDir`
-4. 根据 Codex CLI exit code 把指令标记为 done 或 failed
-5. 如果 `enabled=true` 且 `codex.notifyResult=true`，发送任务结果卡片到飞书
-```
-
-会话选择命令由 listener 直接处理，不需要 Codex CLI worker：
+会话选择命令由 listener 直接处理，不进入普通任务队列：
 
 ```text
 @机器人 list-session
@@ -287,7 +287,7 @@ worker 的执行顺序：
 
 `list-session` 返回最近可用会话列表，每个会话都有“介入”按钮；`current-session` 返回当前已绑定的 Codex 会话。点击按钮后，listener 会处理 `card.action.trigger` 回调并完成会话选择。
 
-选择后，listener 会把 `codex.sessionId`、`codex.sessionTitle`、`codex.cwd` 和 `codex.enabled=true` 写回 `~/.feishu-agent-bridge/config.json`。后续普通指令才会进入 queue，并由 Codex CLI worker 继续这个 Codex 会话。
+选择后，listener 会把 `codex.sessionId`、`codex.sessionTitle`、`codex.cwd` 和 `codex.enabled=true` 写回 `~/.feishu-agent-bridge/config.json`。后续普通指令才会进入 SQLite queue，并由 `fab-runtime` 继续这个 Codex 会话。
 
 如果按钮回调没有生效，通常是飞书开放平台尚未放通或发布卡片回调事件。临时备用命令仍然可用：
 
@@ -334,23 +334,16 @@ pnpm smoke
 入站链路验证：
 
 ```bash
-pnpm listen
+pnpm runtime:status
 ```
 
-在飞书目标群里 `@机器人 继续执行测试`，然后通过 MCP 调用：
+在飞书目标群里先 `@机器人 list-session` 并选择会话，再发送 `@机器人 继续执行测试`。然后通过 MCP 调用 `feishu_command_status`，确认对应 session 的 `pending/in_progress/done/failed` 统计变化。
 
-```json
-{
-  "name": "feishu_next_command",
-  "arguments": {}
-}
-```
-
-看到 `command.text` 返回 `继续执行测试` 后，调用 `feishu_ack_command` 标记处理结果。
+`feishu_next_command` / `feishu_ack_command` 仍保留给调试和外部 Agent，但 `fab-runtime` 主路径不依赖它们。
 
 ## 注意事项
 
 - 飞书 IM API 要求消息 `content` 字段是 JSON 字符串，本项目会按这个格式发送。
 - 当 `enabled: false` 时，通知工具会返回 `skipped`，不会请求飞书 API。
 - 当 `inbound.enabled: false` 时，长连接 listener 不会启动；已经进入本地队列的指令仍可通过 MCP 查询。
-- `commands.json` 是本机状态文件，不要提交到仓库。
+- `commands.db` 和旧 `commands.json` 都是本机状态文件，不要提交到仓库。

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { enqueueCommand } from "../src/commandQueue.js";
 import { FeishuClient } from "../src/feishuClient.js";
+import { listenerRuntimeStatusPath } from "../src/listenerRuntime.js";
 import { createToolRegistry } from "../src/tools.js";
 import type { BridgeConfig } from "../src/types.js";
 
@@ -69,7 +70,12 @@ test("feishu_notify_task_result validates status and sends a card", async () => 
         appId: "cli_test",
         appSecret: "secret_test",
         receiveId: "oc_test",
-        enabled: true
+        enabled: true,
+        codex: {
+          ...DEFAULT_CONFIG.codex,
+          sessionId: "019e2142-8030-7353-bb1b-0f11ad3e82fb",
+          sessionTitle: "看一下 live-socket mcp能识别到了吗"
+        }
       }),
       "utf8"
     );
@@ -82,7 +88,11 @@ test("feishu_notify_task_result validates status and sends a card", async () => 
 
     assert.match(result.content[0].text, /sent/);
     assert.equal(client.sent.length, 1);
-    assert.match(JSON.stringify(client.sent[0].card), /done/);
+    const cardText = JSON.stringify(client.sent[0].card);
+    assert.match(cardText, /done/);
+    assert.match(cardText, /Codex session.*\(unbound\)/);
+    assert.doesNotMatch(cardText, /live-socket/);
+    assert.doesNotMatch(cardText, /#019e2142/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -131,7 +141,7 @@ test("feishu_set_enabled persists the local enabled switch", async () => {
 test("inbound command tools read, claim, and acknowledge queued commands", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-tools-"));
   const configPath = join(dir, "config.json");
-  const queuePath = join(dir, "commands.json");
+  const queuePath = join(dir, "commands.db");
   try {
     await writeFile(
       configPath,
@@ -140,7 +150,7 @@ test("inbound command tools read, claim, and acknowledge queued commands", async
         inbound: {
           ...DEFAULT_CONFIG.inbound,
           enabled: true,
-          queuePath
+          queueDbPath: queuePath
         }
       }),
       "utf8"
@@ -153,7 +163,9 @@ test("inbound command tools read, claim, and acknowledge queued commands", async
         chatId: "oc_1",
         chatType: "group",
         sender: { openId: "ou_user" },
-        createdAt: "1710000000000"
+        createdAt: "1710000000000",
+        sessionId: "session_1",
+        sessionTitle: "Session 1"
       },
       queuePath
     );
@@ -187,13 +199,96 @@ test("inbound command tools read, claim, and acknowledge queued commands", async
 test("feishu_set_inbound_enabled persists the inbound switch", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-tools-"));
   const configPath = join(dir, "config.json");
+  const queuePath = join(dir, "commands.db");
   try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        ...DEFAULT_CONFIG,
+        inbound: {
+          ...DEFAULT_CONFIG.inbound,
+          queueDbPath: queuePath
+        }
+      }),
+      "utf8"
+    );
     const registry = createToolRegistry({ configPath, feishuClient: new FakeFeishuClient() });
     const result = await registry.callTool("feishu_set_inbound_enabled", { enabled: true });
     assert.match(result.content[0].text, /inbound.enabled=true/);
 
     const status = await registry.callTool("feishu_command_status", {});
     assert.match(status.content[0].text, /"inboundEnabled": true/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("feishu_command_status reports a standalone screen listener heartbeat", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-tools-"));
+  const configPath = join(dir, "config.json");
+  const queuePath = join(dir, "commands.db");
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        ...DEFAULT_CONFIG,
+        inbound: {
+          ...DEFAULT_CONFIG.inbound,
+          enabled: true,
+          queueDbPath: queuePath
+        }
+      }),
+      "utf8"
+    );
+    await writeFile(
+      listenerRuntimeStatusPath(configPath),
+      JSON.stringify({
+        managedBy: "standalone",
+        pid: process.pid,
+        processAlive: true,
+        updatedAt: new Date().toISOString(),
+        runtimeStatusPath: listenerRuntimeStatusPath(configPath),
+        running: true,
+        ready: true,
+        configPath,
+        queuePath,
+        startedAt: "2026-05-15T00:00:00.000Z",
+        enqueuedCount: 3,
+        ignoredCount: 1
+      }),
+      "utf8"
+    );
+
+    const registry = createToolRegistry({ configPath, feishuClient: new FakeFeishuClient() });
+    const status = await registry.callTool("feishu_command_status", {});
+    const payload = JSON.parse(status.content[0].text);
+
+    assert.equal(payload.listener.running, true);
+    assert.equal(payload.listener.ready, true);
+    assert.equal(payload.listener.managedBy, "standalone");
+    assert.equal(payload.listener.pid, process.pid);
+    assert.equal(payload.listener.queuePath, queuePath);
+    assert.equal(payload.listener.enqueuedCount, 3);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener start and stop tools point to the standalone runtime", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-tools-"));
+  const configPath = join(dir, "config.json");
+  try {
+    const registry = createToolRegistry({ configPath, feishuClient: new FakeFeishuClient() });
+    const start = await registry.callTool("feishu_start_command_listener", {});
+    const stop = await registry.callTool("feishu_stop_command_listener", {});
+    const startPayload = JSON.parse(start.content[0].text);
+    const stopPayload = JSON.parse(stop.content[0].text);
+
+    assert.equal(startPayload.managedBy, "runtime");
+    assert.match(startPayload.command, /runtime\.js/);
+    assert.match(startPayload.screenCommand, /fab-runtime/);
+    assert.equal(stopPayload.managedBy, "runtime");
+    assert.match(stopPayload.message, /fab-runtime/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
