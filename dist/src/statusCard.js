@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import { buildNotificationCard } from "./card.js";
 export function buildCommandStatusCard(command, config, options) {
     const nowMs = options.nowMs ?? Date.now();
@@ -17,6 +18,9 @@ export function buildCommandStatusCard(command, config, options) {
         options.exitCode !== undefined ? `退出码：${options.exitCode ?? "null"}` : undefined,
         options.signal ? `退出信号：${options.signal}` : undefined,
         options.timedOut ? "结果：Codex CLI 超时" : undefined,
+        command.attachments?.length
+            ? `附件：${command.attachments.length} 个（${command.attachments.map((item) => basename(item.path)).join(", ")}）`
+            : undefined,
         statusSummary ? `进度摘要：${truncateMultiline(statusSummary, 900)}` : undefined
     ].filter((line) => Boolean(line));
     return buildNotificationCard({

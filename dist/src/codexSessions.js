@@ -10,6 +10,9 @@ export function parseCodexSessionControlCommand(text) {
     if (/^(?:current-session|session-status|session-current)$/i.test(trimmed)) {
         return { type: "current-session" };
     }
+    if (/^(?:unbind-session|detach-session|clear-session)$/i.test(trimmed)) {
+        return { type: "unbind-session" };
+    }
     const listMatch = trimmed.match(/^list-sessions?(?:\s+(.+))?$/i);
     if (listMatch) {
         const selector = listMatch[1]?.trim();
@@ -38,6 +41,26 @@ export async function handleCodexSessionControlCommand(control, config, configPa
                 control: "list-session",
                 title: "Codex sessions",
                 summary: formatSessionList(sessions, config.codex.sessionListLimit)
+            };
+        }
+        if (control.type === "unbind-session") {
+            await saveConfigPatch({
+                codex: {
+                    enabled: false,
+                    sessionId: undefined,
+                    sessionTitle: undefined,
+                    sessionSource: undefined,
+                    sessionUpdatedAt: undefined,
+                    sessionGitBranch: undefined,
+                    useLast: false,
+                    cwd: undefined
+                }
+            }, configPath);
+            return {
+                ackState: "done",
+                control: "unbind-session",
+                title: "Codex session unbound",
+                summary: "已解除当前全局 Codex 会话配置。飞书群维度绑定请在对应群里发送 unbind-session。"
             };
         }
         const session = await findCodexSession(config.codex, control.selector);
@@ -145,6 +168,7 @@ export function formatSessionList(sessions, limit) {
     lines.push("switch-session <sessionId>");
     lines.push("");
     lines.push("查看当前会话：current-session");
+    lines.push("解绑当前会话：unbind-session");
     return lines.join("\n");
 }
 export function formatSelectedSession(session) {

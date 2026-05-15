@@ -16,6 +16,13 @@ import {
   recoverInProgressCommands,
   updateCommandStatusMetadata
 } from "../src/commandQueue.js";
+import {
+  bindingToCommandSession,
+  deleteChatSessionBinding,
+  getChatSessionBinding,
+  listChatSessionBindingsBySession,
+  upsertChatSessionBinding
+} from "../src/chatBindings.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -164,6 +171,86 @@ insert into commands (
 
     const commands = await listCommands(queuePath);
     assert.equal(commands[0].statusMessageId, "om_status");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("command queue stores attachments and chat session bindings", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-queue-attachments-"));
+  const queuePath = join(dir, "commands.db");
+  try {
+    const binding = await upsertChatSessionBinding(queuePath, {
+      chatId: "oc_test",
+      chatType: "group",
+      chatName: "图片测试群",
+      session: {
+        id: "session_image",
+        title: "图片识别",
+        cwd: "/tmp/image",
+        source: "vscode",
+        updatedAt: 2000,
+        createdAt: 1000,
+        gitBranch: "main"
+      }
+    });
+    assert.equal((await getChatSessionBinding(queuePath, "oc_test"))?.sessionId, "session_image");
+    assert.equal((await getChatSessionBinding(queuePath, "oc_test"))?.chatName, "图片测试群");
+
+    const result = await enqueueCommand(
+      {
+        text: "识别图片",
+        rawText: "识别图片",
+        messageId: "om_image_task",
+        chatId: "oc_test",
+        chatType: "group",
+        sender: { openId: "ou_sender" },
+        createdAt: "1710000000000",
+        ...bindingToCommandSession(binding),
+        attachments: [
+          {
+            type: "image",
+            source: "feishu",
+            path: "/tmp/image.png",
+            messageId: "om_image",
+            resourceKey: "img_key",
+            mimeType: "image/png",
+            sizeBytes: 10,
+            sha256: "sha"
+          }
+        ]
+      },
+      queuePath
+    );
+
+    const commands = await listCommands(queuePath);
+    assert.equal(commands[0].id, result.command.id);
+    assert.equal(commands[0].attachments?.length, 1);
+    assert.equal(commands[0].attachments?.[0].resourceKey, "img_key");
+    assert.equal(commands[0].sessionCwd, "/tmp/image");
+
+    await upsertChatSessionBinding(queuePath, {
+      chatId: "oc_other",
+      chatType: "group",
+      chatName: "另一个群",
+      session: {
+        id: "session_image",
+        title: "图片识别",
+        cwd: "/tmp/image",
+        source: "vscode",
+        updatedAt: 2000,
+        createdAt: 1000
+      }
+    });
+    const shared = await listChatSessionBindingsBySession(queuePath, "session_image", {
+      excludeChatId: "oc_test"
+    });
+    assert.equal(shared.length, 1);
+    assert.equal(shared[0].chatName, "另一个群");
+
+    const deleted = await deleteChatSessionBinding(queuePath, "oc_other");
+    assert.equal(deleted?.sessionId, "session_image");
+    assert.equal(await getChatSessionBinding(queuePath, "oc_other"), undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

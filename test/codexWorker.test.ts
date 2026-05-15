@@ -141,13 +141,27 @@ test("buildFeishuCommandPrompt tells resumed Codex not to send Feishu messages i
     sender: {},
     source: "feishu",
     receivedAt: "2026-05-14T10:00:00.000Z",
-    attempts: 0
+    attempts: 0,
+    attachments: [
+      {
+        type: "image",
+        source: "feishu",
+        path: "/tmp/fab/image.png",
+        messageId: "om_image",
+        resourceKey: "img_key",
+        mimeType: "image/png",
+        sizeBytes: 10,
+        sha256: "sha"
+      }
+    ]
   });
 
   assert.match(prompt, /不要调用 feishu_notify/);
   assert.match(prompt, /外层 feishu-agent-bridge runtime 会自动/);
   assert.match(prompt, /可公开/);
   assert.match(prompt, /回我一条消息，带代码块/);
+  assert.match(prompt, /本地附件/);
+  assert.match(prompt, /\/tmp\/fab\/image\.png/);
 });
 
 test("processNextCodexCommand updates an existing status card while running and when done", async () => {

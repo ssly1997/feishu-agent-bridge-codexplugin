@@ -5,10 +5,19 @@ const MAX_CWD_LENGTH = 120;
 
 export function buildCodexSessionListCard(
   sessions: CodexSession[],
-  limit: number
+  limit: number,
+  options: {
+    title?: string;
+    notice?: string;
+  } = {}
 ): Record<string, unknown> {
   const visible = sessions.slice(0, limit);
   const elements: Array<Record<string, unknown>> = [];
+
+  if (options.notice) {
+    elements.push(markdownBlock(options.notice));
+    elements.push({ tag: "hr" });
+  }
 
   if (visible.length === 0) {
     elements.push(markdownBlock("没有找到可用的 Codex 会话。"));
@@ -22,7 +31,7 @@ export function buildCodexSessionListCard(
     }
   }
 
-  elements.push(markdownBlock("_按钮不可用时，可发送 list-session <序号> 作为备用。_"));
+  elements.push(markdownBlock("_按钮不可用时，可发送 list-session <序号> 作为备用；解绑当前群可发送 unbind-session。_"));
 
   return {
     schema: "2.0",
@@ -34,7 +43,7 @@ export function buildCodexSessionListCard(
       template: "blue",
       title: {
         tag: "plain_text",
-        content: "选择要介入的 Codex 会话"
+        content: options.title ?? "选择要介入的 Codex 会话"
       }
     },
     body: {

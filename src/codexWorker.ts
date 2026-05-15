@@ -32,7 +32,7 @@ export interface CodexCommandProcessResult {
   command?: AgentCommand;
   codex?: CodexResumeResult;
   ackState?: "done" | "failed";
-  control?: "current-session" | "list-session" | "select-session";
+  control?: "current-session" | "list-session" | "select-session" | "unbind-session";
   summary?: string;
   notification?: "sent" | "updated" | "skipped";
   notifyError?: string;
@@ -231,7 +231,7 @@ function codexConfigForCommand(config: BridgeConfig, command: AgentCommand): Bri
 }
 
 export function buildFeishuCommandPrompt(command: AgentCommand): string {
-  return [
+  const lines = [
     "你正在处理一条来自飞书群聊的 Agent 指令。",
     "请执行用户的原始指令，并把最终答复写在本次 Codex 回复中。",
     "不要调用 feishu_notify、feishu_notify_task_result、feishu_send_test 或其他飞书发送工具；外层 feishu-agent-bridge runtime 会自动把你的最终答复转发回飞书。",
@@ -240,7 +240,23 @@ export function buildFeishuCommandPrompt(command: AgentCommand): string {
     "",
     "用户原始指令：",
     command.text
-  ].join("\n");
+  ];
+
+  if (command.attachments?.length) {
+    lines.push(
+      "",
+      "本次飞书指令包含本地附件，请直接读取这些绝对路径完成识别或分析："
+    );
+    for (const [index, attachment] of command.attachments.entries()) {
+      lines.push(
+        `${index + 1}. type=${attachment.type} path=${attachment.path}` +
+          `${attachment.mimeType ? ` mime=${attachment.mimeType}` : ""}` +
+          `${attachment.sizeBytes !== undefined ? ` size=${attachment.sizeBytes}` : ""}`
+      );
+    }
+  }
+
+  return lines.join("\n");
 }
 
 async function notifyFinalCommandStatus(

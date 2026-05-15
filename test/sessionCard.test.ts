@@ -32,6 +32,22 @@ test("buildCodexSessionListCard renders session buttons", () => {
   assert.match(text, /callback/);
 });
 
+test("buildCodexSessionListCard can render an explicit unbound notice", () => {
+  const card = buildCodexSessionListCard(
+    [],
+    10,
+    {
+      title: "当前群尚未绑定 Codex 会话",
+      notice: "这条任务暂未入队。请先选择一个 Codex 会话。"
+    }
+  );
+
+  const text = JSON.stringify(card);
+  assert.match(text, /当前群尚未绑定 Codex 会话/);
+  assert.match(text, /这条任务暂未入队/);
+  assert.match(text, /没有找到可用的 Codex 会话/);
+});
+
 test("parseSelectSessionActionValue accepts only bridge-owned actions", () => {
   assert.equal(
     parseSelectSessionActionValue(buildSelectSessionActionValue("session_1")),

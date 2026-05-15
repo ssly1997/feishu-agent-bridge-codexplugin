@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { FeishuApiError, FeishuClient } from "../src/feishuClient.js";
 
@@ -126,6 +129,78 @@ test("FeishuClient updates an existing interactive message", async () => {
   const body = JSON.parse(String(updateCall.init?.body));
   assert.equal(typeof body.content, "string");
   assert.deepEqual(JSON.parse(body.content), { config: { update_multi: true } });
+});
+
+test("FeishuClient downloads a message resource to a local file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-feishu-resource-"));
+  const outputPath = join(dir, "image.png");
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const fetchImpl = async (url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    if (url.includes("/auth/v3/tenant_access_token/internal")) {
+      return jsonResponse({ code: 0, tenant_access_token: "tat_test", expire: 7200 });
+    }
+    const body = Buffer.from("image-bytes");
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "image-bytes",
+      arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+      headers: {
+        get: (name: string) => name.toLowerCase() === "content-type" ? "image/png" : null
+      }
+    };
+  };
+
+  try {
+    const client = new FeishuClient({ fetchImpl });
+    const result = await client.downloadMessageResource(
+      readyConfig,
+      "om_image",
+      "img_key",
+      outputPath
+    );
+
+    assert.equal(await readFile(outputPath, "utf8"), "image-bytes");
+    assert.equal(result.path, outputPath);
+    assert.equal(result.mimeType, "image/png");
+    assert.equal(result.sizeBytes, Buffer.byteLength("image-bytes"));
+    assert.match(result.sha256, /^[a-f0-9]{64}$/);
+    const resourceCall = calls.find((call) => call.url.includes("/messages/om_image/resources/img_key"));
+    assert.ok(resourceCall);
+    assert.match(resourceCall.url, /[?&]type=image(?:&|$)/);
+    assert.equal(resourceCall.init?.method, "GET");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("FeishuClient reads chat info", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const fetchImpl = async (url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    if (url.includes("/auth/v3/tenant_access_token/internal")) {
+      return jsonResponse({ code: 0, tenant_access_token: "tat_test", expire: 7200 });
+    }
+    return jsonResponse({
+      code: 0,
+      data: {
+        chat_id: "oc_test",
+        name: "测试群",
+        chat_type: "group"
+      }
+    });
+  };
+
+  const client = new FeishuClient({ fetchImpl });
+  const result = await client.getChatInfo(readyConfig, "oc_test");
+
+  assert.equal(result.chatId, "oc_test");
+  assert.equal(result.name, "测试群");
+  assert.equal(result.chatType, "group");
+  const chatCall = calls.find((call) => call.url.includes("/im/v1/chats/oc_test"));
+  assert.ok(chatCall);
+  assert.equal(chatCall.init?.method, "GET");
 });
 
 test("FeishuClient maps Feishu API errors without exposing credentials", async () => {

@@ -24,11 +24,12 @@ export interface CodexSession {
 export type CodexSessionControlCommand =
   | { type: "current-session" }
   | { type: "list-session" }
+  | { type: "unbind-session" }
   | { type: "select-session"; selector: string };
 
 export interface CodexSessionControlResult {
   ackState: "done" | "failed";
-  control: "current-session" | "list-session" | "select-session";
+  control: "current-session" | "list-session" | "select-session" | "unbind-session";
   title: string;
   summary: string;
 }
@@ -39,6 +40,10 @@ export function parseCodexSessionControlCommand(
   const trimmed = text.trim();
   if (/^(?:current-session|session-status|session-current)$/i.test(trimmed)) {
     return { type: "current-session" };
+  }
+
+  if (/^(?:unbind-session|detach-session|clear-session)$/i.test(trimmed)) {
+    return { type: "unbind-session" };
   }
 
   const listMatch = trimmed.match(/^list-sessions?(?:\s+(.+))?$/i);
@@ -79,6 +84,30 @@ export async function handleCodexSessionControlCommand(
         control: "list-session",
         title: "Codex sessions",
         summary: formatSessionList(sessions, config.codex.sessionListLimit)
+      };
+    }
+
+    if (control.type === "unbind-session") {
+      await saveConfigPatch(
+        {
+          codex: {
+            enabled: false,
+            sessionId: undefined,
+            sessionTitle: undefined,
+            sessionSource: undefined,
+            sessionUpdatedAt: undefined,
+            sessionGitBranch: undefined,
+            useLast: false,
+            cwd: undefined
+          }
+        },
+        configPath
+      );
+      return {
+        ackState: "done",
+        control: "unbind-session",
+        title: "Codex session unbound",
+        summary: "已解除当前全局 Codex 会话配置。飞书群维度绑定请在对应群里发送 unbind-session。"
       };
     }
 
@@ -202,6 +231,7 @@ export function formatSessionList(sessions: CodexSession[], limit: number): stri
   lines.push("switch-session <sessionId>");
   lines.push("");
   lines.push("查看当前会话：current-session");
+  lines.push("解绑当前会话：unbind-session");
   return lines.join("\n");
 }
 

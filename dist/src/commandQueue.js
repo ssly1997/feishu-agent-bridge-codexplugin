@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { ensureChatSessionBindingSchema } from "./chatBindings.js";
 import { CONFIG_DIR } from "./config.js";
 const execFileAsync = promisify(execFile);
 export const DEFAULT_COMMAND_QUEUE_DB_PATH = join(CONFIG_DIR, "commands.db");
@@ -47,12 +48,13 @@ export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_DB
         sessionSource: input.sessionSource,
         sessionGitBranch: input.sessionGitBranch,
         sessionUpdatedAt: input.sessionUpdatedAt,
+        attachments: input.attachments,
         attempts: 0
     };
     await sqliteExec(queuePath, `insert into commands (
       id, state, text, raw_text, message_id, chat_id, chat_type, sender_json, source,
       event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
-      session_source, session_git_branch, session_updated_at, attempts
+      session_source, session_git_branch, session_updated_at, attachments_json, attempts
     ) values (
       ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
       ${sqlValue(command.rawText)}, ${sqlValue(command.messageId)}, ${sqlValue(command.chatId)},
@@ -60,7 +62,8 @@ export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_DB
       ${sqlValue(command.source)}, ${sqlValue(command.eventId)}, ${sqlValue(command.tenantKey)},
       ${sqlValue(command.createdAt)}, ${sqlValue(command.receivedAt)}, ${sqlValue(command.sessionId)},
       ${sqlValue(command.sessionTitle)}, ${sqlValue(command.sessionCwd)}, ${sqlValue(command.sessionSource)},
-      ${sqlValue(command.sessionGitBranch)}, ${sqlNumber(command.sessionUpdatedAt)}, ${command.attempts}
+      ${sqlValue(command.sessionGitBranch)}, ${sqlNumber(command.sessionUpdatedAt)},
+      ${sqlValue(JSON.stringify(command.attachments ?? []))}, ${command.attempts}
     );`);
     return { command, inserted: true };
 }
@@ -232,7 +235,7 @@ async function insertCommand(queuePath, command) {
       event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
       session_source, session_git_branch, session_updated_at, claimed_at, completed_at,
       attempts, result_summary, status_message_id, status_updated_at, status_notify_error,
-      status_summary
+      status_summary, attachments_json
     ) values (
       ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
       ${sqlValue(command.rawText)}, ${sqlValue(command.messageId)}, ${sqlValue(command.chatId)},
@@ -244,7 +247,7 @@ async function insertCommand(queuePath, command) {
       ${sqlValue(command.claimedAt)}, ${sqlValue(command.completedAt)}, ${command.attempts},
       ${sqlValue(command.resultSummary)}, ${sqlValue(command.statusMessageId)},
       ${sqlValue(command.statusUpdatedAt)}, ${sqlValue(command.statusNotifyError)},
-      ${sqlValue(command.statusSummary)}
+      ${sqlValue(command.statusSummary)}, ${sqlValue(JSON.stringify(command.attachments ?? []))}
     );`);
 }
 async function findCommandById(queuePath, id) {
@@ -285,13 +288,15 @@ async function ensureSchema(queuePath) {
        status_message_id text,
        status_updated_at text,
        status_notify_error text,
-       status_summary text
+       status_summary text,
+       attachments_json text
      );
      create index if not exists commands_state_session_idx
        on commands(state, session_id, received_at, id);
      create index if not exists commands_session_idx
        on commands(session_id, received_at, id);`);
     await ensureCommandStatusColumns(queuePath);
+    await ensureChatSessionBindingSchema(queuePath);
 }
 async function ensureCommandStatusColumns(queuePath) {
     const columns = await sqliteJson(queuePath, "pragma table_info(commands);");
@@ -300,7 +305,8 @@ async function ensureCommandStatusColumns(queuePath) {
         ["status_message_id", "text"],
         ["status_updated_at", "text"],
         ["status_notify_error", "text"],
-        ["status_summary", "text"]
+        ["status_summary", "text"],
+        ["attachments_json", "text"]
     ].filter(([name]) => !existing.has(name));
     for (const [name, type] of missing) {
         try {
@@ -376,7 +382,8 @@ function rowToCommand(row) {
         statusMessageId: row.status_message_id ?? undefined,
         statusUpdatedAt: row.status_updated_at ?? undefined,
         statusNotifyError: row.status_notify_error ?? undefined,
-        statusSummary: row.status_summary ?? undefined
+        statusSummary: row.status_summary ?? undefined,
+        attachments: parseAttachments(row.attachments_json)
     };
 }
 function normalizeLegacyCommand(value) {
@@ -419,7 +426,19 @@ function normalizeLegacyCommand(value) {
         statusMessageId: stringValue(value.statusMessageId),
         statusUpdatedAt: stringValue(value.statusUpdatedAt),
         statusNotifyError: stringValue(value.statusNotifyError),
-        statusSummary: stringValue(value.statusSummary)
+        statusSummary: stringValue(value.statusSummary),
+        attachments: Array.isArray(value.attachments)
+            ? value.attachments.filter((item) => (isRecord(item) && item.type === "image")).map((item) => ({
+                type: "image",
+                path: stringValue(item.path) ?? "",
+                source: "feishu",
+                messageId: stringValue(item.messageId) ?? messageId,
+                resourceKey: stringValue(item.resourceKey) ?? "",
+                mimeType: stringValue(item.mimeType),
+                sizeBytes: numberValue(item.sizeBytes),
+                sha256: stringValue(item.sha256)
+            })).filter((item) => item.path && item.resourceKey)
+            : undefined
     };
 }
 function parseSender(value) {
@@ -430,6 +449,33 @@ function parseSender(value) {
     catch {
         return {};
     }
+}
+function parseAttachments(value) {
+    if (!value)
+        return undefined;
+    let parsed;
+    try {
+        parsed = JSON.parse(value);
+    }
+    catch {
+        return undefined;
+    }
+    if (!Array.isArray(parsed))
+        return undefined;
+    const attachments = parsed
+        .filter((item) => (isRecord(item) && item.type === "image"))
+        .map((item) => ({
+        type: "image",
+        path: stringValue(item.path) ?? "",
+        source: "feishu",
+        messageId: stringValue(item.messageId) ?? "",
+        resourceKey: stringValue(item.resourceKey) ?? "",
+        mimeType: stringValue(item.mimeType),
+        sizeBytes: numberValue(item.sizeBytes),
+        sha256: stringValue(item.sha256)
+    }))
+        .filter((item) => item.path && item.messageId && item.resourceKey);
+    return attachments.length > 0 ? attachments : undefined;
 }
 function sqlValue(value) {
     if (value === undefined || value === null)

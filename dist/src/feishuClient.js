@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { ConfigError, assertAppCredentialsReady, assertSendReady } from "./config.js";
 export class FeishuApiError extends Error {
     code;
@@ -74,6 +77,63 @@ export class FeishuClient {
         }
         return {
             messageId: response.data?.message_id ?? messageId
+        };
+    }
+    async downloadMessageResource(config, messageId, resourceKey, outputPath, resourceType = "image") {
+        if (!messageId) {
+            throw new ConfigError("messageId must be a non-empty string");
+        }
+        if (!resourceKey) {
+            throw new ConfigError("resourceKey must be a non-empty string");
+        }
+        if (!resourceType) {
+            throw new ConfigError("resourceType must be a non-empty string");
+        }
+        assertAppCredentialsReady(config);
+        const token = await this.getTenantAccessToken(config);
+        const url = `${this.baseUrl}/im/v1/messages/${encodeURIComponent(messageId)}/resources/${encodeURIComponent(resourceKey)}?type=${encodeURIComponent(resourceType)}`;
+        const response = await this.fetchImpl(url, {
+            method: "GET",
+            headers: {
+                Authorization: `Bearer ${token}`
+            }
+        });
+        if (!response.ok) {
+            const text = await response.text();
+            throw new FeishuApiError(`Feishu API HTTP ${response.status}: ${text || "resource download failed"}`, {
+                status: response.status
+            });
+        }
+        const buffer = response.arrayBuffer
+            ? Buffer.from(new Uint8Array(await response.arrayBuffer()))
+            : Buffer.from(await response.text());
+        await mkdir(dirname(outputPath), { recursive: true });
+        await writeFile(outputPath, buffer);
+        return {
+            path: outputPath,
+            mimeType: response.headers?.get("content-type") ?? undefined,
+            sizeBytes: buffer.byteLength,
+            sha256: createHash("sha256").update(buffer).digest("hex")
+        };
+    }
+    async getChatInfo(config, chatId) {
+        if (!chatId) {
+            throw new ConfigError("chatId must be a non-empty string");
+        }
+        assertAppCredentialsReady(config);
+        const token = await this.getTenantAccessToken(config);
+        const response = await this.getJson(`${this.baseUrl}/im/v1/chats/${encodeURIComponent(chatId)}`, {
+            Authorization: `Bearer ${token}`
+        });
+        if (response.code !== 0) {
+            throw new FeishuApiError(`Feishu get chat info failed: ${response.msg || "unknown error"}`, {
+                code: response.code
+            });
+        }
+        return {
+            chatId: response.data?.chat_id ?? chatId,
+            name: response.data?.name,
+            chatType: response.data?.chat_type
         };
     }
     async sendMessage(config, input) {

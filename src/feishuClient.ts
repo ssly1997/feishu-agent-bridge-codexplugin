@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { BridgeConfig, ReceiveIdType } from "./types.js";
 import { ConfigError, assertAppCredentialsReady, assertSendReady } from "./config.js";
 
@@ -5,6 +8,10 @@ type FetchLike = (url: string, init?: RequestInit) => Promise<{
   ok: boolean;
   status: number;
   text(): Promise<string>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
+  headers?: {
+    get(name: string): string | null;
+  };
 }>;
 
 interface TokenResponse {
@@ -20,6 +27,29 @@ interface MessageResponse {
   data?: {
     message_id?: string;
   };
+}
+
+interface ChatInfoResponse {
+  code: number;
+  msg?: string;
+  data?: {
+    chat_id?: string;
+    name?: string;
+    chat_type?: string;
+  };
+}
+
+export interface DownloadedMessageResource {
+  path: string;
+  mimeType?: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export interface FeishuChatInfo {
+  chatId: string;
+  name?: string;
+  chatType?: string;
 }
 
 export class FeishuApiError extends Error {
@@ -130,6 +160,78 @@ export class FeishuClient {
 
     return {
       messageId: response.data?.message_id ?? messageId
+    };
+  }
+
+  async downloadMessageResource(
+    config: BridgeConfig,
+    messageId: string,
+    resourceKey: string,
+    outputPath: string,
+    resourceType = "image"
+  ): Promise<DownloadedMessageResource> {
+    if (!messageId) {
+      throw new ConfigError("messageId must be a non-empty string");
+    }
+    if (!resourceKey) {
+      throw new ConfigError("resourceKey must be a non-empty string");
+    }
+    if (!resourceType) {
+      throw new ConfigError("resourceType must be a non-empty string");
+    }
+    assertAppCredentialsReady(config);
+    const token = await this.getTenantAccessToken(config);
+    const url = `${this.baseUrl}/im/v1/messages/${encodeURIComponent(messageId)}/resources/${encodeURIComponent(resourceKey)}?type=${encodeURIComponent(resourceType)}`;
+    const response = await this.fetchImpl(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new FeishuApiError(`Feishu API HTTP ${response.status}: ${text || "resource download failed"}`, {
+        status: response.status
+      });
+    }
+
+    const buffer = response.arrayBuffer
+      ? Buffer.from(new Uint8Array(await response.arrayBuffer()))
+      : Buffer.from(await response.text());
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, buffer);
+    return {
+      path: outputPath,
+      mimeType: response.headers?.get("content-type") ?? undefined,
+      sizeBytes: buffer.byteLength,
+      sha256: createHash("sha256").update(buffer).digest("hex")
+    };
+  }
+
+  async getChatInfo(config: BridgeConfig, chatId: string): Promise<FeishuChatInfo> {
+    if (!chatId) {
+      throw new ConfigError("chatId must be a non-empty string");
+    }
+    assertAppCredentialsReady(config);
+    const token = await this.getTenantAccessToken(config);
+    const response = await this.getJson<ChatInfoResponse>(
+      `${this.baseUrl}/im/v1/chats/${encodeURIComponent(chatId)}`,
+      {
+        Authorization: `Bearer ${token}`
+      }
+    );
+
+    if (response.code !== 0) {
+      throw new FeishuApiError(`Feishu get chat info failed: ${response.msg || "unknown error"}`, {
+        code: response.code
+      });
+    }
+
+    return {
+      chatId: response.data?.chat_id ?? chatId,
+      name: response.data?.name,
+      chatType: response.data?.chat_type
     };
   }
 

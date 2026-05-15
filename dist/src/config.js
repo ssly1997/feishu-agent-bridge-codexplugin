@@ -262,7 +262,6 @@ function sanitizeInboundConfig(config) {
         queueDbPath: config.queueDbPath,
         requireMention: config.requireMention,
         botOpenId: mask(config.botOpenId),
-        allowedChatIds: config.allowedChatIds?.map(mask),
         allowedOpenIds: config.allowedOpenIds?.map(mask),
         acknowledgeOnReceive: config.acknowledgeOnReceive,
         acknowledgementText: config.acknowledgementText

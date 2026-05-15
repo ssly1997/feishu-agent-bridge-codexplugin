@@ -75,6 +75,7 @@ test("session formatters include selection commands", () => {
   assert.match(list, /list-session <序号>/);
   assert.match(list, /switch-session <序号>/);
   assert.match(list, /current-session/);
+  assert.match(list, /unbind-session/);
   assert.match(list, /session_new/);
   assert.match(formatSelectedSession(sessions[0]), /已介入 Codex 会话/);
 });
@@ -102,6 +103,12 @@ test("parseCodexSessionControlCommand recognizes current and switch aliases", ()
   assert.deepEqual(parseCodexSessionControlCommand("switch-session 1"), {
     type: "select-session",
     selector: "1"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("unbind-session"), {
+    type: "unbind-session"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("detach-session"), {
+    type: "unbind-session"
   });
 });
 

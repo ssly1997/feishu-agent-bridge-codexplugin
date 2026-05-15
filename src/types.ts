@@ -110,6 +110,17 @@ export interface AgentCommandSender {
   senderType?: string;
 }
 
+export interface AgentCommandAttachment {
+  type: "image";
+  path: string;
+  source: "feishu";
+  messageId: string;
+  resourceKey: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  sha256?: string;
+}
+
 export interface AgentCommand {
   id: string;
   state: AgentCommandState;
@@ -138,6 +149,7 @@ export interface AgentCommand {
   statusUpdatedAt?: string;
   statusNotifyError?: string;
   statusSummary?: string;
+  attachments?: AgentCommandAttachment[];
 }
 
 export interface NewAgentCommand {
@@ -156,4 +168,5 @@ export interface NewAgentCommand {
   sessionSource?: string;
   sessionGitBranch?: string;
   sessionUpdatedAt?: number;
+  attachments?: AgentCommandAttachment[];
 }

@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import { buildNotificationCard } from "./card.js";
 import type { AgentCommand, BridgeConfig, NotifyStatus } from "./types.js";
 
@@ -37,6 +38,9 @@ export function buildCommandStatusCard(
     options.exitCode !== undefined ? `退出码：${options.exitCode ?? "null"}` : undefined,
     options.signal ? `退出信号：${options.signal}` : undefined,
     options.timedOut ? "结果：Codex CLI 超时" : undefined,
+    command.attachments?.length
+      ? `附件：${command.attachments.length} 个（${command.attachments.map((item) => basename(item.path)).join(", ")}）`
+      : undefined,
     statusSummary ? `进度摘要：${truncateMultiline(statusSummary, 900)}` : undefined
   ].filter((line): line is string => Boolean(line));
 
