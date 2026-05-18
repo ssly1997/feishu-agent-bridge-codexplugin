@@ -17,6 +17,15 @@ export function parseCodexSessionControlCommand(text) {
     if (/^(?:help|帮助)$/i.test(trimmed)) {
         return { type: "help" };
     }
+    if (/^(?:features?|menu|commands?|功能|功能面板|菜单|能力|能力列表)$/i.test(trimmed)) {
+        return { type: "features" };
+    }
+    const featureDetailMatch = trimmed.match(/^(?:feature|功能)\s+(.+)$/i);
+    if (featureDetailMatch?.[1]) {
+        const feature = normalizeFeatureKey(featureDetailMatch[1]);
+        if (feature)
+            return { type: "feature-detail", feature };
+    }
     if (/^(?:status-full|full-status|work-status-full|task-status-full|完整状态|状态详情|任务状态详情)$/i.test(trimmed)) {
         return { type: "status", full: true };
     }
@@ -78,6 +87,22 @@ export async function handleCodexSessionControlCommand(control, config, configPa
                 control: "help",
                 title: "Codex session help",
                 summary: formatGlobalHelp()
+            };
+        }
+        if (control.type === "features") {
+            return {
+                ackState: "done",
+                control: "features",
+                title: "Codex feature panel",
+                summary: formatGlobalFeaturePanel()
+            };
+        }
+        if (control.type === "feature-detail") {
+            return {
+                ackState: "done",
+                control: "feature-detail",
+                title: `Codex feature: ${control.feature}`,
+                summary: formatGlobalFeatureDetail(control.feature)
             };
         }
         if (control.type === "current-session") {
@@ -717,6 +742,7 @@ function formatGlobalHelp() {
         "可用指令：",
         "",
         "help / 帮助：查看帮助。",
+        "features / 功能：用卡片查看常用功能入口。",
         "status：用精简卡片查看当前工作状态。",
         "status-full：用完整卡片查看 runtime 和任务队列明细。",
         "list-project [页码]：列出可绑定 project。",
@@ -733,6 +759,66 @@ function formatGlobalHelp() {
         "",
         `分页默认每页 ${DEFAULT_SESSION_PAGE_SIZE} 个。临时对话默认不进入 project 绑定。`
     ].join("\n");
+}
+function formatGlobalFeaturePanel() {
+    return [
+        "功能面板：",
+        "",
+        "触发方式：在飞书群里发送 功能 或 features。",
+        "主卡会展示按钮式功能入口，不混入 help 里的项目/会话管理按钮。",
+        "",
+        "按钮：MCP、个性、代码审查、侧边、压缩、反馈、宠物、快速、推理模式、模型、派生。"
+    ].join("\n");
+}
+function formatGlobalFeatureDetail(feature) {
+    const details = {
+        mcp: "MCP：飞书卡片会读取 codex mcp list 并展示当前 MCP server 列表；CLI 也支持 get|add|remove|login|logout。",
+        personality: "个性：feature flag personality，可通过 profile/config 承载。",
+        review: "代码审查：codex review --uncommitted / --base <branch> / --commit <sha>；飞书里可发 cr 最近提交 或 代码审查 未提交改动 进入 Agent 队列。",
+        side: "侧边：codex fork --last [prompt]。",
+        compression: "压缩：enable_request_compression 是稳定 feature flag；当前 codex --help 未暴露立即压缩当前会话的独立子命令。",
+        feedback: "反馈：当前 codex --help 未暴露稳定独立子命令。",
+        pet: "宠物：本机 CLI help / feature flags 未看到公开入口，暂按桌面专属处理。",
+        fast: "快速：--enable fast_mode / --disable fast_mode。",
+        reasoning: "推理模式：codex -c model_reasoning_effort=\"xhigh\" 或配置 model_reasoning_effort。",
+        model: "模型：codex -m <model> 或配置 model。",
+        fork: "派生：codex fork <sessionId> [prompt]，也支持 --last、-m <model>、-p <profile>。"
+    };
+    return [
+        details[feature] ?? "未知功能。",
+        "",
+        "校验依据：codex --help、codex mcp --help、codex review --help、codex fork --help、codex features list。"
+    ].join("\n");
+}
+function normalizeFeatureKey(value) {
+    const normalized = value.trim().toLowerCase();
+    const aliases = {
+        mcp: "mcp",
+        personality: "personality",
+        "个性": "personality",
+        review: "review",
+        cr: "review",
+        "代码审查": "review",
+        side: "side",
+        "侧边": "side",
+        compression: "compression",
+        compress: "compression",
+        "压缩": "compression",
+        feedback: "feedback",
+        "反馈": "feedback",
+        pet: "pet",
+        "宠物": "pet",
+        fast: "fast",
+        "快速": "fast",
+        reasoning: "reasoning",
+        "推理": "reasoning",
+        "推理模式": "reasoning",
+        model: "model",
+        "模型": "model",
+        fork: "fork",
+        "派生": "fork"
+    };
+    return aliases[normalized];
 }
 function parsePage(value) {
     if (!value)

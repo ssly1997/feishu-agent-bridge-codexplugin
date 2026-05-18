@@ -2,6 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildBindProjectActionValue,
+  buildEnqueueAgentCommandActionValue,
+  buildCodexFeatureDetailCard,
+  buildCodexFeatureCard,
+  buildCodexMcpListCard,
   buildCodexHelpCard,
   buildCodexProjectListCard,
   buildCodexSessionListCard,
@@ -188,6 +192,7 @@ test("buildCodexHelpCard renders command shortcut buttons", () => {
   assert.match(text, /run_codex_command/);
   assert.deepEqual(collectRunCommands(card), [
     "help",
+    "features",
     "status",
     "status-full",
     "list-project",
@@ -212,11 +217,158 @@ test("buildCodexHelpCard renders command shortcut buttons", () => {
     type: "run-command",
     command: "status-full"
   });
+  assert.deepEqual(parseCodexCardActionValue(buildRunCommandActionValue("features")), {
+    type: "run-command",
+    command: "features"
+  });
+  assert.deepEqual(parseCodexCardActionValue(buildRunCommandActionValue("feature mcp")), {
+    type: "run-command",
+    command: "feature mcp"
+  });
+  assert.deepEqual(parseCodexCardActionValue(buildEnqueueAgentCommandActionValue(
+    "请 code review 最近一次提交，优先指出风险、回归和测试缺口。"
+  )), {
+    type: "enqueue-command",
+    command: "请 code review 最近一次提交，优先指出风险、回归和测试缺口。"
+  });
+  assert.deepEqual(parseCodexCardActionValue(buildEnqueueAgentCommandActionValue("随便执行")), undefined);
   assert.deepEqual(parseCodexCardActionValue(buildRunCommandActionValue("unbind-project")), {
     type: "run-command",
     command: "unbind-project"
   });
   assert.deepEqual(parseCodexCardActionValue(buildRunCommandActionValue("bind-project 1")), undefined);
+});
+
+test("buildCodexFeatureCard renders CLI-backed feature entries", () => {
+  const card = buildCodexFeatureCard({
+    projectLabel: "project  repo",
+    sessionTitle: "当前会话",
+    sessionId: "session_123456789",
+    model: "gpt-5.5",
+    profile: "full-access",
+    sandbox: "danger-full-access"
+  });
+
+  const text = JSON.stringify(card);
+  assert.match(text, /Codex 功能面板/);
+  assert.match(text, /功能入口/);
+  assert.match(text, /run_codex_command/);
+  assert.match(text, /feature mcp/);
+  assert.match(text, /feature review/);
+  assert.match(text, /个性/);
+  assert.match(text, /Model: gpt-5\.5/);
+  assert.match(text, /反馈/);
+  assert.match(text, /宠物/);
+  assert.doesNotMatch(text, /不做一键控制/);
+  assert.doesNotMatch(text, /桌面内部能力/);
+  assert.doesNotMatch(text, /codex mcp list/);
+  assert.doesNotMatch(text, /list-project/);
+  assert.doesNotMatch(text, /list-session/);
+  assert.doesNotMatch(text, /current-project/);
+  assert.deepEqual(collectRunCommands(card), [
+    "feature mcp",
+    "feature personality",
+    "feature review",
+    "feature side",
+    "feature compression",
+    "feature feedback",
+    "feature pet",
+    "feature fast",
+    "feature reasoning",
+    "feature model",
+    "feature fork"
+  ]);
+
+  const unboundText = JSON.stringify(buildCodexFeatureCard());
+  assert.doesNotMatch(unboundText, /list-project/);
+});
+
+test("buildCodexFeatureDetailCard renders feature detail and back button", () => {
+  const card = buildCodexFeatureDetailCard("review", {
+    projectLabel: "project repo"
+  });
+
+  const text = JSON.stringify(card);
+  assert.match(text, /Codex 功能：代码审查/);
+  assert.match(text, /codex review --uncommitted/);
+  assert.match(text, /可执行操作/);
+  assert.match(text, /审查未提交/);
+  assert.match(text, /审查最近提交/);
+  assert.match(text, /enqueue_agent_command/);
+  assert.match(text, /返回功能面板/);
+  assert.deepEqual(collectRunCommands(card), ["features"]);
+  assert.deepEqual(collectAgentCommands(card), [
+    "请对当前工作区的未提交改动做 code review，优先指出风险、回归和测试缺口。",
+    "请 code review 最近一次提交，优先指出风险、回归和测试缺口。"
+  ]);
+});
+
+test("all non-MCP feature detail cards expose task buttons", () => {
+  for (const feature of [
+    "personality",
+    "review",
+    "side",
+    "compression",
+    "feedback",
+    "pet",
+    "fast",
+    "reasoning",
+    "model",
+    "fork"
+  ]) {
+    const card = buildCodexFeatureDetailCard(feature);
+    const text = JSON.stringify(card);
+    assert.match(text, /可执行操作/, feature);
+    assert.match(text, /enqueue_agent_command/, feature);
+    assert.ok(collectAgentCommands(card).length > 0, feature);
+  }
+});
+
+test("buildCodexMcpListCard renders MCP servers with colored state badges", () => {
+  const card = buildCodexMcpListCard({
+    projectLabel: "project repo",
+    command: "codex mcp list",
+    servers: [
+      {
+        name: "feishu-agent-bridge",
+        transport: "stdio",
+        status: "enabled",
+        auth: "Unsupported",
+        command: "node",
+        args: "./scripts/codex-plugin-mcp.mjs",
+        cwd: "/Users/lifangchang/.codex/plugins/cache/local/feishu-agent-bridge/0.1.2/."
+      },
+      {
+        name: "viewinspect",
+        transport: "http",
+        status: "enabled",
+        auth: "Unsupported",
+        url: "http://127.0.0.1:47199/mcp"
+      },
+      {
+        name: "live-socket",
+        transport: "stdio",
+        status: "disabled",
+        auth: "Unsupported",
+        command: "live-agentprobe-mcp"
+      }
+    ]
+  });
+
+  const text = JSON.stringify(card);
+  assert.match(text, /Codex 功能：MCP/);
+  assert.match(text, /MCP server 列表/);
+  assert.doesNotMatch(text, /Enabled MCP servers/);
+  assert.doesNotMatch(text, /Disabled MCP servers/);
+  assert.match(text, /<font color='green'>\[Enabled\]<\/font> \*\*feishu-agent-bridge\*\*/);
+  assert.match(text, /<font color='grey'>\[Disabled\]<\/font> \*\*live-socket\*\*/);
+  assert.match(text, /feishu-agent-bridge/);
+  assert.match(text, /viewinspect/);
+  assert.match(text, /http:\/\/127\.0\.0\.1:47199\/mcp/);
+  assert.match(text, /Servers: 3/);
+  assert.doesNotMatch(text, /刷新/);
+  assert.doesNotMatch(text, /返回功能面板/);
+  assert.deepEqual(collectRunCommands(card), []);
 });
 
 function collectRunCommands(value: unknown): string[] {
@@ -233,5 +385,22 @@ function collectRunCommands(value: unknown): string[] {
   return [
     ...current,
     ...Object.values(object).flatMap(collectRunCommands)
+  ];
+}
+
+function collectAgentCommands(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap(collectAgentCommands);
+  }
+  if (typeof value !== "object" || value === null) {
+    return [];
+  }
+  const object = value as Record<string, unknown>;
+  const current = object.action === "enqueue_agent_command" && typeof object.command === "string"
+    ? [object.command]
+    : [];
+  return [
+    ...current,
+    ...Object.values(object).flatMap(collectAgentCommands)
   ];
 }

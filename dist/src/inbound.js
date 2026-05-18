@@ -1,14 +1,16 @@
 import * as lark from "@larksuiteoapi/node-sdk";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { clearChatActiveSession, deleteChatSessionBinding, bindingToCommandSession, formatCurrentChatProject, formatCurrentChatSession, getChatSessionBinding, listChatSessionBindingsBySession, updateChatSessionBindingChatName, upsertChatSessionBinding } from "./chatBindings.js";
 import { assertAppCredentialsReady, ConfigError, CONFIG_DIR, CONFIG_PATH, loadConfig } from "./config.js";
 import { enqueueCommand, getCommandQueueStats, listCommands, resolveCommandQueuePath, updateCommandStatusMetadata } from "./commandQueue.js";
 import { findCodexSession, findCodexProject, formatSelectedSessionWithSummary, listCodexProjects, listCodexSessions, parseCodexSessionControlCommand } from "./codexSessions.js";
+import { readCodexMcpList } from "./codexMcp.js";
 import { runCodexNewSession } from "./codexCli.js";
 import { FeishuClient } from "./feishuClient.js";
 import { formatGitBranchLine, formatGitBranchValueForCwd, readGitWorkingTreeStatus } from "./gitStatus.js";
-import { buildCodexHelpCard, buildCodexProjectListCard, buildCodexSessionListCard, parseCodexCardActionValue } from "./sessionCard.js";
+import { buildCodexFeatureDetailCard, buildCodexFeatureCard, buildCodexMcpListCard, buildCodexHelpCard, buildCodexProjectListCard, buildCodexSessionListCard, parseCodexCardActionValue } from "./sessionCard.js";
 import { buildCommandStatusCard } from "./statusCard.js";
 import { readStandaloneListenerRuntimeStatus } from "./listenerRuntime.js";
 const IMAGE_CANDIDATE_TTL_MS = 5 * 60 * 1000;
@@ -336,6 +338,46 @@ export class FeishuCommandListener {
             this.logHandledControl("help", command);
             return;
         }
+        if (control.type === "features") {
+            const binding = await getChatSessionBinding(queuePath, command.chatId);
+            await feishuClient.sendInteractiveMessageToReceiver(config, {
+                receiveIdType: "chat_id",
+                receiveId: command.chatId
+            }, buildCodexFeatureCard({
+                projectLabel: binding?.projectDisplayLabel,
+                sessionTitle: binding?.sessionTitle,
+                sessionId: binding?.sessionId,
+                isTemporary: binding?.projectKind === "temporary",
+                model: config.codex.model,
+                profile: config.codex.profile,
+                sandbox: config.codex.sandbox
+            }));
+            this.logHandledControl("features", command);
+            return;
+        }
+        if (control.type === "feature-detail") {
+            const binding = await getChatSessionBinding(queuePath, command.chatId);
+            const card = control.feature === "mcp"
+                ? buildCodexMcpListCard({
+                    projectLabel: binding?.projectDisplayLabel,
+                    sessionTitle: binding?.sessionTitle,
+                    sessionId: binding?.sessionId,
+                    isTemporary: binding?.projectKind === "temporary",
+                    ...(await readCodexMcpList(config.codex))
+                })
+                : buildCodexFeatureDetailCard(control.feature, {
+                    projectLabel: binding?.projectDisplayLabel,
+                    sessionTitle: binding?.sessionTitle,
+                    sessionId: binding?.sessionId,
+                    isTemporary: binding?.projectKind === "temporary"
+                });
+            await feishuClient.sendInteractiveMessageToReceiver(config, {
+                receiveIdType: "chat_id",
+                receiveId: command.chatId
+            }, card);
+            this.logHandledControl("feature-detail", command);
+            return;
+        }
         if (control.type === "list-project") {
             await this.sendProjectSelectionCard(config, command, feishuClient, {
                 page: control.page
@@ -552,6 +594,10 @@ export class FeishuCommandListener {
                 });
                 return;
             }
+            if (action.type === "enqueue-command") {
+                await this.enqueueCardCommand(config, queuePath, event, action.command, feishuClient);
+                return;
+            }
             if (action.type === "run-command") {
                 const control = parseCodexSessionControlCommand(action.command);
                 if (!control) {
@@ -591,6 +637,67 @@ export class FeishuCommandListener {
         catch (error) {
             this.lastError = formatError(error);
             stderrLogger.error("[card]", "failed to handle card action", this.lastError);
+        }
+    }
+    async enqueueCardCommand(config, queuePath, event, commandText, feishuClient) {
+        const cardCommand = {
+            text: commandText,
+            rawText: commandText,
+            messageId: `${event.messageId}:action:${randomUUID()}`,
+            chatId: event.chatId,
+            sender: {
+                openId: event.operator.openId
+            },
+            eventId: `card:${event.messageId}`
+        };
+        const binding = await getChatSessionBinding(queuePath, event.chatId);
+        if (!binding?.projectId) {
+            this.ignoredCount += 1;
+            await this.sendProjectSelectionCard(config, cardCommand, feishuClient, {
+                title: "当前群尚未绑定 Codex project",
+                notice: [
+                    "**按钮任务暂未入队：当前群尚未绑定 Codex project。**",
+                    "",
+                    "请先选择一个 project，绑定后再点击功能按钮。"
+                ].join("\n")
+            });
+            return;
+        }
+        const session = bindingToCommandSession(binding);
+        if (!session) {
+            this.ignoredCount += 1;
+            await this.sendSessionPage(config, cardCommand, feishuClient, {
+                mode: "project",
+                page: 1,
+                projectId: binding.projectId,
+                projectLabel: binding.projectDisplayLabel,
+                notice: [
+                    "**按钮任务暂未入队：当前 project 还没有 active session。**",
+                    "",
+                    "请先选择一个 session，或发送 `new-session` 在当前 project 下开启新会话。"
+                ].join("\n")
+            });
+            return;
+        }
+        let { command, inserted } = await enqueueCommand({
+            ...cardCommand,
+            ...session
+        }, queuePath);
+        stderrLogger.info("[card]", inserted ? "enqueued feature command" : "duplicate feature command", JSON.stringify({
+            commandId: command.id,
+            messageId: command.messageId,
+            chatId: command.chatId,
+            text: command.text
+        }));
+        if (inserted) {
+            this.enqueuedCount += 1;
+            this.lastCommandAt = new Date().toISOString();
+        }
+        if (inserted && config.inbound.acknowledgeOnReceive) {
+            command = await this.sendQueuedStatusCard(config, command, queuePath, feishuClient);
+        }
+        if (inserted) {
+            await this.options.onCommandEnqueued?.(command);
         }
     }
     async createNewSessionForChat(config, queuePath, chat, prompt, feishuClient) {

@@ -821,6 +821,237 @@ test("listener runs help-card command actions", async () => {
   }
 });
 
+test("listener runs feature button actions", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-feature-action-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+
+    await (
+      listener as unknown as {
+        completeCardAction: (
+          event: { messageId: string; chatId: string; operator: { openId: string } },
+          action: { type: "run-command"; command: string },
+          feishuClient: FeishuClient
+        ) => Promise<void>;
+      }
+    ).completeCardAction(
+      { messageId: "om_card", chatId: "oc_test", operator: { openId: "ou_operator" } },
+      { type: "run-command", command: "feature review" },
+      client
+    );
+
+    assert.equal(client.cards.length, 1);
+    const cardText = JSON.stringify(client.cards[0].card);
+    assert.match(cardText, /Codex 功能：代码审查/);
+    assert.match(cardText, /codex review --uncommitted/);
+    assert.match(cardText, /返回功能面板/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener enqueues feature detail agent task buttons", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-feature-task-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const enqueued: unknown[] = [];
+  const listener = new FeishuCommandListener({
+    configPath,
+    onCommandEnqueued: (command) => {
+      enqueued.push(command);
+    }
+  });
+  const task = "请 code review 最近一次提交，优先指出风险、回归和测试缺口。";
+  try {
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+
+    await (
+      listener as unknown as {
+        completeCardAction: (
+          event: { messageId: string; chatId: string; operator: { openId: string } },
+          action: { type: "enqueue-command"; command: string },
+          feishuClient: FeishuClient
+        ) => Promise<void>;
+      }
+    ).completeCardAction(
+      { messageId: "om_card", chatId: "oc_test", operator: { openId: "ou_operator" } },
+      { type: "enqueue-command", command: task },
+      client
+    );
+
+    const commands = await listCommands(queuePath);
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].text, task);
+    assert.equal(commands[0].sender.openId, "ou_operator");
+    assert.match(commands[0].messageId, /^om_card:action:/);
+    assert.equal(enqueued.length, 1);
+    assert.equal(client.cards.length, 1);
+    assert.match(JSON.stringify(client.cards[0].card), /queued/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener renders actual MCP list for the MCP feature button", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-feature-mcp-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const fakeCodexPath = join(dir, "fake-codex.mjs");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+    await writeFile(fakeCodexPath, `#!/usr/bin/env node
+if (process.argv[2] !== "mcp" || process.argv[3] !== "list") process.exit(2);
+console.log("Name                 Command   Args                                               Env  Cwd   Status    Auth");
+console.log("feishu-agent-bridge  node      ./scripts/codex-plugin-mcp.mjs                     -    /tmp  enabled   Unsupported");
+console.log("figma                npx       -y figma-developer-mcp --figma-api-key=figd_test  -    -     enabled   Unsupported");
+console.log("live-socket          live      -                                                  -    -     disabled  Unsupported");
+console.log("");
+console.log("Name         Url                         Bearer Token Env Var  Status   Auth");
+console.log("viewinspect  http://127.0.0.1:47199/mcp  -                     enabled  Unsupported");
+`, "utf8");
+    await chmod(fakeCodexPath, 0o755);
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        command: fakeCodexPath
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+
+    await (
+      listener as unknown as {
+        completeCardAction: (
+          event: { messageId: string; chatId: string; operator: { openId: string } },
+          action: { type: "run-command"; command: string },
+          feishuClient: FeishuClient
+        ) => Promise<void>;
+      }
+    ).completeCardAction(
+      { messageId: "om_card", chatId: "oc_test", operator: { openId: "ou_operator" } },
+      { type: "run-command", command: "feature mcp" },
+      client
+    );
+
+    assert.equal(client.cards.length, 1);
+    const cardText = JSON.stringify(client.cards[0].card);
+    assert.match(cardText, /Codex 功能：MCP/);
+    assert.match(cardText, /MCP server 列表/);
+    assert.match(cardText, /feishu-agent-bridge/);
+    assert.match(cardText, /viewinspect/);
+    assert.match(cardText, /Servers: 4/);
+    assert.doesNotMatch(cardText, /Enabled MCP servers/);
+    assert.doesNotMatch(cardText, /Disabled MCP servers/);
+    assert.match(cardText, /<font color='grey'>\[Disabled\]<\/font> \*\*live-socket\*\*/);
+    assert.match(cardText, /--figma-api-key/);
+    assert.doesNotMatch(cardText, /figd_test/);
+    assert.doesNotMatch(cardText, /feature mcp/);
+    assert.doesNotMatch(cardText, /返回功能面板/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener sends a feature panel card from the features command", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-features-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        model: "gpt-5.5",
+        profile: "full-access",
+        sandbox: "danger-full-access" as const
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      messageId: "om_features",
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> 功能"
+      }),
+      mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
+    }), config, client);
+
+    assert.equal(client.texts.length, 0);
+    assert.equal(client.cards.length, 1);
+    assert.equal((await listCommands(queuePath)).length, 0);
+    const cardText = JSON.stringify(client.cards[0].card);
+    assert.match(cardText, /Codex 功能面板/);
+    assert.match(cardText, /功能入口/);
+    assert.match(cardText, /feature mcp/);
+    assert.match(cardText, /feature review/);
+    assert.match(cardText, /代码审查/);
+    assert.match(cardText, /gpt-5\.5/);
+    assert.match(cardText, /宠物/);
+    assert.match(cardText, /run_codex_command/);
+    assert.doesNotMatch(cardText, /codex mcp list/);
+    assert.doesNotMatch(cardText, /list-project/);
+    assert.doesNotMatch(cardText, /list-session/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("listener creates and binds a new session in the current project", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-inbound-new-session-"));
   const projectRoot = join(dir, "project");
@@ -885,7 +1116,7 @@ writeFileSync(outputPath, "新会话已创建");
         command: scriptPath,
         stateDbPath: dbPath,
         outputDir: join(dir, "codex-output"),
-        timeoutMs: 5000
+        timeoutMs: 15000
       }
     };
     await writeFile(configPath, JSON.stringify(config), "utf8");
@@ -1007,10 +1238,14 @@ writeFileSync(outputPath, "初始化完成");
       mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
     }), config, client);
 
-    for (let attempt = 0; attempt < 50 && client.texts.length < 2; attempt += 1) {
-      await delay(20);
+    let binding = await getChatSessionBinding(queuePath, "oc_test");
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (binding?.sessionId === "session_fresh" && client.texts.length >= 2) {
+        break;
+      }
+      await delay(50);
+      binding = await getChatSessionBinding(queuePath, "oc_test");
     }
-    const binding = await getChatSessionBinding(queuePath, "oc_test");
     assert.equal(binding?.sessionId, "session_fresh");
     assert.equal(binding?.sessionTitle, "继续优化插件");
     assert.equal(client.texts.length, 2);

@@ -341,7 +341,7 @@ corepack pnpm runtime
 7. 唤醒对应 session runner
 8. 调用 codex exec resume <sessionId> -
 9. 低频更新 in_progress 摘要
-10. 完成后更新 done / failed 状态卡，必要时发送结果卡兜底
+10. 完成后更新 done / failed 状态卡，done 卡保留多行结论和总耗时，默认裁掉收到/认领/完成时间、尝试次数、退出码和输出 artifact 路径，必要时发送结果卡兜底
 ```
 
 同一 session 串行执行；不同 session 可以并发执行。这样可以避免多个飞书群同时写入同一个 Codex 上下文。
@@ -353,6 +353,8 @@ corepack pnpm runtime
 
 ```text
 @机器人 help
+@机器人 features
+@机器人 功能
 @机器人 status
 @机器人 status-full
 @机器人 list-project
@@ -381,6 +383,7 @@ corepack pnpm runtime
 - `list-session --temp` 展示 temporary session。
 - `status` 用精简卡片展示当前群 active session、正在执行的任务、队列摘要和 runtime 摘要。
 - `status-full` 用完整卡片展示 runtime、队列路径、配置和最近任务明细。
+- `features` / `功能` 用功能面板卡片展示 Codex 自身能力，不混入 `help` 里的 project/session 管理按钮；主卡展示 `MCP`、`个性`、`代码审查`、`侧边`、`压缩`、`反馈`、`宠物`、`快速`、`推理模式`、`模型`、`派生` 等按钮，点击后再打开对应功能详情卡。其中 `MCP` 会实时执行 `codex mcp list`，用颜色状态标签区分 enabled / disabled，并展示 server 名称、transport、status、auth、url/command 等关键字段，敏感 token 参数会脱敏。其他详情卡会提供可点击的任务按钮，例如审查未提交改动、审查最近提交、检查模型/推理/fast/compression/personality 配置、尝试 fork/side 派生等；按钮会直接把对应任务加入当前群绑定的 Codex session 队列。当前 `codex --help` 没有暴露稳定独立入口的能力会在卡片中单独注明。
 - `switch-session` 只能切换当前 project 内的 session。跨 project 需要先 `switch-project`。
 - `new-session` 会在当前 project root 下启动新的 `codex exec`，等待本地 state DB 落盘后绑定为 active session。
 - `unbind-session` 只解除当前 active session，保留当前 project 绑定；后续可以继续 `list-session` / `new-session`。

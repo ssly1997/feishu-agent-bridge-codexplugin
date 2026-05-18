@@ -5,12 +5,188 @@ const MAX_CWD_LENGTH = 120;
 const MAX_PROJECT_LENGTH = 100;
 const BRIDGE_ACTION_OWNER = "feishu-agent-bridge";
 
+interface CodexFeatureActionDefinition {
+  label: string;
+  task: string;
+  primary?: boolean;
+}
+
+const CODEX_FEATURE_DETAILS = {
+  mcp: {
+    label: "MCP",
+    status: "CLI supported",
+    detail: "管理 Codex MCP server。CLI 支持 `codex mcp list|get|add|remove|login|logout`。",
+    actions: []
+  },
+  personality: {
+    label: "个性",
+    status: "Feature flag",
+    detail: "本机 `codex features list` 已暴露 `personality`，可通过 profile/config 承载。",
+    actions: [
+      {
+        label: "检查配置",
+        task: "检查当前工作区的 Codex personality 功能：读取本机 Codex feature/config 状态，说明是否可用以及当前配置方式。",
+        primary: true
+      }
+    ]
+  },
+  review: {
+    label: "代码审查",
+    status: "CLI supported",
+    detail: "CLI 支持 `codex review --uncommitted`、`--base <branch>`、`--commit <sha>`；飞书里可发 `cr 最近提交` 或 `代码审查 未提交改动` 进入 Agent 队列。",
+    actions: [
+      {
+        label: "审查未提交",
+        task: "请对当前工作区的未提交改动做 code review，优先指出风险、回归和测试缺口。",
+        primary: true
+      },
+      {
+        label: "审查最近提交",
+        task: "请 code review 最近一次提交，优先指出风险、回归和测试缺口。"
+      }
+    ]
+  },
+  side: {
+    label: "侧边",
+    status: "CLI supported",
+    detail: "可用 `codex fork --last [prompt]` 从最近会话派生侧边对话。",
+    actions: [
+      {
+        label: "派生侧边",
+        task: "请尝试使用本机 Codex CLI 为当前会话派生一个 side conversation，报告派生结果和后续使用方式。",
+        primary: true
+      }
+    ]
+  },
+  compression: {
+    label: "压缩",
+    status: "Feature flag",
+    detail: "`enable_request_compression` 是稳定 feature flag；当前 `codex --help` 未暴露“立即压缩当前会话”的独立子命令。",
+    actions: [
+      {
+        label: "检查压缩",
+        task: "检查当前 Codex 请求压缩能力：读取 feature/config 状态，说明是否启用 enable_request_compression，以及是否需要调整。",
+        primary: true
+      }
+    ]
+  },
+  feedback: {
+    label: "反馈",
+    status: "No stable CLI command",
+    detail: "本机 `codex --help` 未暴露稳定独立子命令。",
+    actions: [
+      {
+        label: "整理反馈",
+        task: "整理一份针对当前任务或插件体验的反馈草稿，包含问题、影响和建议改进。",
+        primary: true
+      }
+    ]
+  },
+  pet: {
+    label: "宠物",
+    status: "Desktop only",
+    detail: "本机 CLI help / feature flags 未看到公开入口，暂按桌面专属处理。",
+    actions: [
+      {
+        label: "检查入口",
+        task: "检查当前本机 Codex 是否暴露宠物功能入口，结合 CLI/help/config 说明能否在飞书侧触发。",
+        primary: true
+      }
+    ]
+  },
+  fast: {
+    label: "快速",
+    status: "CLI supported",
+    detail: "CLI 支持 `--enable fast_mode` / `--disable fast_mode`。",
+    actions: [
+      {
+        label: "检查 fast",
+        task: "检查当前 Codex fast_mode 支持和配置状态，说明如何为后续任务开启或关闭。",
+        primary: true
+      }
+    ]
+  },
+  reasoning: {
+    label: "推理模式",
+    status: "CLI supported",
+    detail: "CLI 支持 `codex -c model_reasoning_effort=\"xhigh\"`，也可写入配置 `model_reasoning_effort`。",
+    actions: [
+      {
+        label: "检查配置",
+        task: "检查当前 Codex 推理模式配置，说明本 session 当前设置、可用取值，以及如何为后续任务切换。",
+        primary: true
+      },
+      {
+        label: "建议模式",
+        task: "结合当前任务复杂度，建议后续使用的 Codex reasoning effort，并说明理由。"
+      }
+    ]
+  },
+  model: {
+    label: "模型",
+    status: "CLI supported",
+    detail: "CLI 支持 `codex -m <model>`，也可配置 `model`。",
+    actions: [
+      {
+        label: "检查模型",
+        task: "检查当前 Codex 模型配置和本机可用模型入口，给出当前 session 的建议模型。",
+        primary: true
+      }
+    ]
+  },
+  fork: {
+    label: "派生",
+    status: "CLI supported",
+    detail: "CLI 支持 `codex fork <sessionId> [prompt]`，也支持 `--last`、`-m <model>`、`-p <profile>`。",
+    actions: [
+      {
+        label: "派生当前会话",
+        task: "请尝试使用 codex fork --last 派生当前会话，报告新会话信息和使用方式。",
+        primary: true
+      }
+    ]
+  }
+} as const satisfies Record<string, {
+  label: string;
+  status: string;
+  detail: string;
+  actions: readonly CodexFeatureActionDefinition[];
+}>;
+type CodexFeatureKey = keyof typeof CODEX_FEATURE_DETAILS;
+const CODEX_FEATURE_ORDER: CodexFeatureKey[] = [
+  "mcp",
+  "personality",
+  "review",
+  "side",
+  "compression",
+  "feedback",
+  "pet",
+  "fast",
+  "reasoning",
+  "model",
+  "fork"
+];
+
 export type CodexCardAction =
   | { type: "select-session"; sessionId: string }
   | { type: "bind-project"; projectId: string }
   | { type: "list-project-page"; page: number }
   | { type: "list-session-page"; mode: CodexSessionListMode; page: number; projectId?: string }
-  | { type: "run-command"; command: string };
+  | { type: "run-command"; command: string }
+  | { type: "enqueue-command"; command: string };
+
+export interface CodexMcpServerSummary {
+  name: string;
+  transport: "stdio" | "http";
+  status: string;
+  auth: string;
+  command?: string;
+  args?: string;
+  env?: string;
+  cwd?: string;
+  url?: string;
+  bearerTokenEnvVar?: string;
+}
 
 export function buildCodexSessionListCard(
   sessions: CodexSession[],
@@ -109,18 +285,8 @@ export function buildCodexHelpCard(options: {
   sessionId?: string;
   isTemporary?: boolean;
 } = {}): Record<string, unknown> {
-  const bindingLines = options.projectLabel || options.sessionId
-    ? [
-      options.projectLabel ? `Project: ${options.projectLabel}` : undefined,
-      options.sessionTitle || options.sessionId
-        ? `Active session: ${options.sessionTitle || "(untitled)"}${options.sessionId ? ` (#${shortId(options.sessionId)})` : ""}`
-        : "Active session: 未绑定",
-      options.isTemporary ? "Temporary: yes" : undefined
-    ].filter((line): line is string => Boolean(line)).join("\n")
-    : "当前群未绑定 project。发送 `list-project` 选择一个 project。";
-
   const elements = [
-    markdownBlock(`**当前绑定**\n${escapeMd(bindingLines)}`),
+    markdownBlock(`**当前绑定**\n${escapeMd(formatFeatureBindingSummary(options))}`),
     { tag: "hr" },
     markdownBlock("**常用命令**"),
     ...helpCommandRows([
@@ -128,6 +294,11 @@ export function buildCodexHelpCard(options: {
         command: "help / 帮助",
         description: "查看这张帮助卡",
         buttonCommand: "help"
+      },
+      {
+        command: "features / 功能",
+        description: "用卡片查看常用功能入口",
+        buttonCommand: "features"
       },
       {
         command: "status",
@@ -203,6 +374,139 @@ export function buildCodexHelpCard(options: {
   return card("Feishu Agent Bridge 帮助", "blue", elements);
 }
 
+export function buildCodexFeatureCard(options: {
+  projectLabel?: string;
+  sessionTitle?: string;
+  sessionId?: string;
+  isTemporary?: boolean;
+  model?: string;
+  profile?: string;
+  sandbox?: string;
+} = {}): Record<string, unknown> {
+  const runtimeLines = [
+    `Model: ${options.model || "(未配置，使用 Codex 默认)"}`,
+    `Profile: ${options.profile || "(未配置)"}`,
+    `Sandbox: ${options.sandbox || "(未配置)"}`
+  ].join("\n");
+
+  const elements = [
+    markdownBlock(`**当前绑定**\n${escapeMd(formatFeatureBindingSummary(options))}`),
+    { tag: "hr" },
+    markdownBlock(`**运行配置**\n${escapeMd(runtimeLines)}`),
+    { tag: "hr" },
+    markdownBlock("**功能入口**\n点击按钮查看对应能力的 CLI 支持情况和飞书触发方式。"),
+    { tag: "hr" },
+    ...featureButtonRows(CODEX_FEATURE_ORDER)
+  ];
+  return card("Codex 功能面板", "blue", elements);
+}
+
+export function buildCodexFeatureDetailCard(feature: string, options: {
+  projectLabel?: string;
+  sessionTitle?: string;
+  sessionId?: string;
+  isTemporary?: boolean;
+} = {}): Record<string, unknown> {
+  const key = normalizeCodexFeatureKey(feature) ?? "mcp";
+  const detail = CODEX_FEATURE_DETAILS[key];
+  const elements: Array<Record<string, unknown>> = [
+    markdownBlock(`**当前绑定**\n${escapeMd(formatFeatureBindingSummary(options))}`),
+    { tag: "hr" },
+    markdownBlock([
+      `**${detail.label}**`,
+      `状态：${detail.status}`,
+      "",
+      detail.detail,
+      "",
+      "校验依据：`codex --help`、`codex features list` 以及相关子命令 help。"
+    ].join("\n"))
+  ];
+  if (detail.actions.length > 0) {
+    elements.push({ tag: "hr" });
+    elements.push(markdownBlock("**可执行操作**\n点击按钮会把对应任务加入当前群绑定的 Codex session 队列。"));
+    elements.push(...featureActionRows(detail.actions));
+  }
+  elements.push({ tag: "hr" });
+  elements.push(singleButtonRow({
+    name: "feature_back",
+    type: "default",
+    content: "返回功能面板",
+    value: buildRunCommandActionValue("features")
+  }));
+  return card(`Codex 功能：${detail.label}`, "blue", elements);
+}
+
+export function buildCodexMcpListCard(options: {
+  projectLabel?: string;
+  sessionTitle?: string;
+  sessionId?: string;
+  isTemporary?: boolean;
+  servers: CodexMcpServerSummary[];
+  command?: string;
+  error?: string;
+}): Record<string, unknown> {
+  const enabledCount = options.servers.filter((server) => server.status.toLowerCase() === "enabled").length;
+  const disabledCount = options.servers.filter((server) => server.status.toLowerCase() === "disabled").length;
+  const summaryLines = [
+    `Servers: ${options.servers.length}`,
+    `Enabled: ${enabledCount}`,
+    disabledCount > 0 ? `Disabled: ${disabledCount}` : undefined,
+    options.command ? `Source: ${options.command}` : "Source: codex mcp list"
+  ].filter((line): line is string => Boolean(line));
+
+  const elements: Array<Record<string, unknown>> = [
+    markdownBlock(`**当前绑定**\n${escapeMd(formatFeatureBindingSummary(options))}`),
+    { tag: "hr" },
+    markdownBlock(`**MCP server 列表**\n${escapeMd(summaryLines.join("\n"))}`)
+  ];
+
+  if (options.error) {
+    elements.push({ tag: "hr" });
+    elements.push(markdownBlock(`**读取失败**\n${escapeMd(truncate(options.error, 300))}`));
+  } else if (options.servers.length === 0) {
+    elements.push({ tag: "hr" });
+    elements.push(markdownBlock("没有从 `codex mcp list` 读取到 MCP server。"));
+  } else {
+    for (const server of options.servers) {
+      elements.push({ tag: "hr" });
+      elements.push(markdownBlock(formatMcpServer(server)));
+    }
+  }
+
+  return card("Codex 功能：MCP", "blue", elements);
+}
+
+function normalizeCodexFeatureKey(value: string): CodexFeatureKey | undefined {
+  const normalized = value.trim().toLowerCase();
+  const aliases: Record<string, CodexFeatureKey> = {
+    mcp: "mcp",
+    personality: "personality",
+    "个性": "personality",
+    review: "review",
+    cr: "review",
+    "代码审查": "review",
+    side: "side",
+    "侧边": "side",
+    compression: "compression",
+    compress: "compression",
+    "压缩": "compression",
+    feedback: "feedback",
+    "反馈": "feedback",
+    pet: "pet",
+    "宠物": "pet",
+    fast: "fast",
+    "快速": "fast",
+    reasoning: "reasoning",
+    "推理": "reasoning",
+    "推理模式": "reasoning",
+    model: "model",
+    "模型": "model",
+    fork: "fork",
+    "派生": "fork"
+  };
+  return aliases[normalized];
+}
+
 export function buildSelectSessionActionValue(sessionId: string): Record<string, string> {
   return {
     bridge: BRIDGE_ACTION_OWNER,
@@ -249,6 +553,14 @@ export function buildRunCommandActionValue(command: string): Record<string, stri
   };
 }
 
+export function buildEnqueueAgentCommandActionValue(command: string): Record<string, string> {
+  return {
+    bridge: BRIDGE_ACTION_OWNER,
+    action: "enqueue_agent_command",
+    command
+  };
+}
+
 export function parseCodexCardActionValue(value: unknown): CodexCardAction | undefined {
   const object = parseActionObject(value);
   if (!object || object.bridge !== BRIDGE_ACTION_OWNER) return undefined;
@@ -281,6 +593,13 @@ export function parseCodexCardActionValue(value: unknown): CodexCardAction | und
     const command = object.command.trim();
     if (isAllowedHelpCommand(command)) {
       return { type: "run-command", command };
+    }
+  }
+
+  if (object.action === "enqueue_agent_command" && typeof object.command === "string") {
+    const command = object.command.trim();
+    if (isAllowedFeatureTaskCommand(command)) {
+      return { type: "enqueue-command", command };
     }
   }
 
@@ -428,6 +747,47 @@ function helpCommandRows(commands: Array<{
   });
 }
 
+function featureButtonRows(features: CodexFeatureKey[]): Array<Record<string, unknown>> {
+  const rows: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < features.length; index += 3) {
+    const chunk = features.slice(index, index + 3);
+    rows.push({
+      tag: "column_set",
+      horizontal_spacing: "8px",
+      horizontal_align: "left",
+      columns: chunk.map((key) => {
+        const detail = CODEX_FEATURE_DETAILS[key];
+        return buttonColumn({
+          name: `feature_${key}`,
+          type: "default",
+          content: detail.label,
+          value: buildRunCommandActionValue(`feature ${key}`)
+        });
+      })
+    });
+  }
+  return rows;
+}
+
+function featureActionRows(actions: readonly CodexFeatureActionDefinition[]): Array<Record<string, unknown>> {
+  const rows: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < actions.length; index += 2) {
+    const chunk = actions.slice(index, index + 2);
+    rows.push({
+      tag: "column_set",
+      horizontal_spacing: "8px",
+      horizontal_align: "left",
+      columns: chunk.map((action) => buttonColumn({
+        name: `feature_task_${safeName(action.label)}`,
+        type: action.primary ? "primary_filled" : "default",
+        content: action.label,
+        value: buildEnqueueAgentCommandActionValue(action.task)
+      }))
+    });
+  }
+  return rows;
+}
+
 function singleButtonRow(options: {
   name: string;
   type: string;
@@ -475,13 +835,41 @@ function paginationRow(
   };
 }
 
+function featureDetailActionsRow(refreshCommand?: string): Record<string, unknown> {
+  const columns = [];
+  if (refreshCommand) {
+    columns.push(buttonColumn({
+      name: "feature_refresh",
+      type: "default",
+      content: "刷新",
+      value: buildRunCommandActionValue(refreshCommand)
+    }));
+  }
+  columns.push(buttonColumn({
+    name: "feature_back",
+    type: "default",
+    content: "返回功能面板",
+    value: buildRunCommandActionValue("features")
+  }));
+  return {
+    tag: "column_set",
+    horizontal_spacing: "8px",
+    horizontal_align: "left",
+    columns
+  };
+}
+
 function parsePageValue(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : 1;
 }
 
 function isAllowedHelpCommand(command: string): boolean {
+  if (/^feature\s+(?:mcp|personality|review|side|compression|feedback|pet|fast|reasoning|model|fork)$/i.test(command)) {
+    return true;
+  }
   return new Set([
     "help",
+    "features",
     "status",
     "status-full",
     "list-project",
@@ -494,6 +882,70 @@ function isAllowedHelpCommand(command: string): boolean {
     "list-session --all",
     "list-session --temp"
   ]).has(command);
+}
+
+function isAllowedFeatureTaskCommand(command: string): boolean {
+  const tasks: string[] = CODEX_FEATURE_ORDER.flatMap((key) =>
+    CODEX_FEATURE_DETAILS[key].actions.map((action) => action.task)
+  );
+  return new Set(tasks).has(command);
+}
+
+function formatBindingSummary(options: {
+  projectLabel?: string;
+  sessionTitle?: string;
+  sessionId?: string;
+  isTemporary?: boolean;
+}): string {
+  return options.projectLabel || options.sessionId
+    ? [
+      options.projectLabel ? `Project: ${options.projectLabel}` : undefined,
+      options.sessionTitle || options.sessionId
+        ? `Active session: ${options.sessionTitle || "(untitled)"}${options.sessionId ? ` (#${shortId(options.sessionId)})` : ""}`
+        : "Active session: 未绑定",
+      options.isTemporary ? "Temporary: yes" : undefined
+    ].filter((line): line is string => Boolean(line)).join("\n")
+    : "当前群未绑定 project。发送 `list-project` 选择一个 project。";
+}
+
+function formatFeatureBindingSummary(options: {
+  projectLabel?: string;
+  sessionTitle?: string;
+  sessionId?: string;
+  isTemporary?: boolean;
+}): string {
+  if (options.projectLabel || options.sessionId) {
+    return formatBindingSummary(options);
+  }
+  return "当前群未绑定 project。";
+}
+
+function formatMcpServer(server: CodexMcpServerSummary): string {
+  const status = server.status.toLowerCase();
+  const statusBadge = mcpStatusBadge(status);
+  const lines = [
+    `${statusBadge} **${escapeMd(server.name)}**`,
+    `Transport: ${escapeMd(server.transport)}  Status: ${escapeMd(server.status || "unknown")}  Auth: ${escapeMd(server.auth || "unknown")}`,
+    server.url ? `URL: ${escapeMd(truncate(server.url, 100))}` : undefined,
+    server.command ? `Command: ${escapeMd(truncate(compactCommand(server.command), 100))}` : undefined,
+    server.args ? `Args: ${escapeMd(truncate(server.args, 120))}` : undefined,
+    server.env ? `Env: ${escapeMd(truncate(server.env, 120))}` : undefined,
+    server.cwd ? `Cwd: ${escapeMd(truncate(server.cwd, 120))}` : undefined,
+    server.bearerTokenEnvVar ? `Bearer env: ${escapeMd(truncate(server.bearerTokenEnvVar, 80))}` : undefined
+  ].filter((line): line is string => Boolean(line));
+  return lines.join("\n");
+}
+
+function mcpStatusBadge(status: string): string {
+  if (status === "enabled") return "<font color='green'>[Enabled]</font>";
+  if (status === "disabled") return "<font color='grey'>[Disabled]</font>";
+  return "<font color='orange'>[Unknown]</font>";
+}
+
+function compactCommand(command: string): string {
+  if (!command.includes("/")) return command;
+  const segments = command.split("/").filter(Boolean);
+  return segments.at(-1) || command;
 }
 
 function safeName(value: string): string {

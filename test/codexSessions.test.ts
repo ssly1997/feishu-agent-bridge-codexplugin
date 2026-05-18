@@ -196,6 +196,20 @@ test("parseCodexSessionControlCommand recognizes current and switch aliases", ()
   assert.deepEqual(parseCodexSessionControlCommand("help"), {
     type: "help"
   });
+  assert.deepEqual(parseCodexSessionControlCommand("功能"), {
+    type: "features"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("menu"), {
+    type: "features"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("feature mcp"), {
+    type: "feature-detail",
+    feature: "mcp"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("功能 代码审查"), {
+    type: "feature-detail",
+    feature: "review"
+  });
   assert.deepEqual(parseCodexSessionControlCommand("list-projects"), {
     type: "list-project",
     page: 1
@@ -223,6 +237,37 @@ test("parseCodexSessionControlCommand recognizes current and switch aliases", ()
 test("parseCodexSessionControlCommand leaves natural language to Agent", () => {
   assert.equal(parseCodexSessionControlCommand("当前的会话Id是多少"), undefined);
   assert.equal(parseCodexSessionControlCommand("你好？"), undefined);
+});
+
+test("handleCodexSessionControlCommand returns CLI-backed feature summary", async () => {
+  const result = await handleCodexSessionControlCommand(
+    { type: "features" },
+    DEFAULT_CONFIG,
+    "/tmp/config.json"
+  );
+
+  assert.equal(result.ackState, "done");
+  assert.equal(result.control, "features");
+  assert.match(result.summary, /按钮式功能入口/);
+  assert.match(result.summary, /MCP、个性、代码审查/);
+  assert.doesNotMatch(result.summary, /桌面内部能力/);
+  assert.doesNotMatch(result.summary, /暂不做一键控制/);
+  assert.doesNotMatch(result.summary, /list-project/);
+  assert.doesNotMatch(result.summary, /list-session/);
+  assert.doesNotMatch(result.summary, /current-session/);
+});
+
+test("handleCodexSessionControlCommand returns feature detail summary", async () => {
+  const result = await handleCodexSessionControlCommand(
+    { type: "feature-detail", feature: "mcp" },
+    DEFAULT_CONFIG,
+    "/tmp/config.json"
+  );
+
+  assert.equal(result.ackState, "done");
+  assert.equal(result.control, "feature-detail");
+  assert.match(result.summary, /codex mcp list/);
+  assert.match(result.summary, /校验依据/);
 });
 
 test("formatCurrentSession reports the bound session", async () => {
