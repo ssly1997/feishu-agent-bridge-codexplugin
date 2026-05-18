@@ -231,7 +231,7 @@ JSON
 | `codex.approvalPolicy` | 透传给 `codex exec --ask-for-approval`，支持 `untrusted`、`on-request`、`on-failure`、`never`。 |
 | `codex.extraArgs` | 附加给 `codex exec` 的参数。 |
 | `codex.timeoutMs` | 单条 Codex CLI 任务最长执行时间。超时会终止子进程并标记失败。 |
-| `codex.inProgressTimeoutMs` | runtime 启动时恢复卡住的 `in_progress` 任务的阈值。 |
+| `codex.inProgressTimeoutMs` | runtime 收到新任务和周期巡检时恢复卡住的 `in_progress` 任务的阈值；runtime 启动时会把上一个 runtime 遗留的 `in_progress` 立即恢复。 |
 | `codex.inProgressRecovery` | 恢复策略，`mark_failed` 或 `reset_pending`。 |
 | `codex.sessionListLimit` | 文本模式下 session/project 列表展示数量。卡片分页固定每页 10 个。 |
 | `codex.outputDir` | Codex CLI JSON 输出文件目录。 |
@@ -334,7 +334,7 @@ corepack pnpm runtime
 ```text
 1. 启动 Feishu long connection listener
 2. 初始化 ~/.feishu-agent-bridge/commands.db，并迁移旧 commands.json
-3. 恢复卡住的 in_progress 任务
+3. 恢复上一个 runtime 遗留的 in_progress 任务，并同步更新原状态卡
 4. 收到 @机器人 普通指令
 5. 检查当前群是否已绑定 Codex project / active session
 6. 写入 SQLite 队列，并发送 queued 状态卡
@@ -345,6 +345,7 @@ corepack pnpm runtime
 ```
 
 同一 session 串行执行；不同 session 可以并发执行。这样可以避免多个飞书群同时写入同一个 Codex 上下文。
+`feishu_command_status` / `listener-runtime.json` 里的 `scheduler` 会展示 `activeSessions`、`recoveryRunning`、`lastRecoveryAt`、`lastRecoveredCount` 和 `lastRecoveryError`，用于判断 runtime 是正在处理、正在自愈，还是恢复逻辑本身失败。
 
 ## 飞书群内命令
 
@@ -531,10 +532,11 @@ sqlite3 ~/.feishu-agent-bridge/commands.db 'select id,state,session_id,text from
 
 - 查看 `feishu_command_status` 的 queue 和 scheduler 状态。
 - 查看 `commands.db` 里该任务的 `state`、`status_message_id`、`status_notify_error`。
+- 查看 scheduler 的 `recoveryRunning`、`lastRecoveryAt`、`lastRecoveredCount`、`lastRecoveryError`。
 - 确认 `codex.enabled=true`。
 - 确认绑定的 session 还存在于 `codex.stateDbPath`。
 - 确认 `codex exec resume --help` 可用。
-- 如果任务卡在 `in_progress`，重启 runtime 会按 `codex.inProgressTimeoutMs` 和 `codex.inProgressRecovery` 恢复。
+- 如果任务卡在 `in_progress`，runtime 启动会立即恢复上一个 runtime 遗留的任务；运行中会在收到新任务和周期巡检时按 `codex.inProgressTimeoutMs` / `codex.inProgressRecovery` 恢复，并尽量同步更新原状态卡。
 
 ### `list-project` 没有想要的 project
 

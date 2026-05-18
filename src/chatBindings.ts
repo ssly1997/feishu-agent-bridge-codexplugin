@@ -6,6 +6,7 @@ import { buildCodexProjectId, formatProjectDisplayLabel, type CodexSession } fro
 import type { NewAgentCommand } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+const SQLITE_BUSY_TIMEOUT_MS = 5000;
 
 export interface ChatSessionBinding {
   chatId: string;
@@ -291,15 +292,19 @@ export async function ensureChatSessionBindingSchema(queuePath: string): Promise
 }
 
 async function sqliteExec(queuePath: string, sql: string): Promise<void> {
-  await execFileAsync("sqlite3", [queuePath, sql], { maxBuffer: 10 * 1024 * 1024 });
+  await execFileAsync("sqlite3", sqliteArgs(queuePath, sql), { maxBuffer: 10 * 1024 * 1024 });
 }
 
 async function sqliteJson<T>(queuePath: string, sql: string): Promise<T[]> {
-  const { stdout } = await execFileAsync("sqlite3", ["-json", queuePath, sql], {
+  const { stdout } = await execFileAsync("sqlite3", ["-json", ...sqliteArgs(queuePath, sql)], {
     maxBuffer: 10 * 1024 * 1024
   });
   const trimmed = stdout.trim();
   return trimmed ? JSON.parse(trimmed) as T[] : [];
+}
+
+function sqliteArgs(queuePath: string, sql: string): string[] {
+  return ["-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, queuePath, sql];
 }
 
 function rowToBinding(row: ChatSessionBindingRow): ChatSessionBinding {

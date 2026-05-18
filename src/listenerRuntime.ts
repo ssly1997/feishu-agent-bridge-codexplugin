@@ -131,7 +131,13 @@ function parseReconnectInfo(value: unknown): ListenerRuntimeStatus["reconnectInf
 function parseSchedulerStatus(value: unknown): RuntimeSchedulerStatus | undefined {
   if (!isRecord(value) || !Array.isArray(value.activeSessions)) return undefined;
   const activeSessions = value.activeSessions.filter((item): item is string => typeof item === "string");
-  return { activeSessions };
+  return {
+    activeSessions,
+    recoveryRunning: optionalBoolean(value.recoveryRunning) ?? false,
+    lastRecoveryAt: optionalString(value.lastRecoveryAt),
+    lastRecoveredCount: optionalNumber(value.lastRecoveredCount),
+    lastRecoveryError: optionalString(value.lastRecoveryError)
+  };
 }
 
 function optionalString(value: unknown): string | undefined {

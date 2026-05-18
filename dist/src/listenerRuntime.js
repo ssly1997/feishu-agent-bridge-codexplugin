@@ -100,7 +100,13 @@ function parseSchedulerStatus(value) {
     if (!isRecord(value) || !Array.isArray(value.activeSessions))
         return undefined;
     const activeSessions = value.activeSessions.filter((item) => typeof item === "string");
-    return { activeSessions };
+    return {
+        activeSessions,
+        recoveryRunning: optionalBoolean(value.recoveryRunning) ?? false,
+        lastRecoveryAt: optionalString(value.lastRecoveryAt),
+        lastRecoveredCount: optionalNumber(value.lastRecoveredCount),
+        lastRecoveryError: optionalString(value.lastRecoveryError)
+    };
 }
 function optionalString(value) {
     return typeof value === "string" ? value : undefined;

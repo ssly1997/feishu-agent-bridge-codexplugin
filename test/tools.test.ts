@@ -254,7 +254,13 @@ test("feishu_command_status reports a standalone screen listener heartbeat", asy
         queuePath,
         startedAt: "2026-05-15T00:00:00.000Z",
         enqueuedCount: 3,
-        ignoredCount: 1
+        ignoredCount: 1,
+        scheduler: {
+          activeSessions: ["session_a"],
+          recoveryRunning: false,
+          lastRecoveryAt: "2026-05-15T00:01:00.000Z",
+          lastRecoveredCount: 2
+        }
       }),
       "utf8"
     );
@@ -269,6 +275,12 @@ test("feishu_command_status reports a standalone screen listener heartbeat", asy
     assert.equal(payload.listener.pid, process.pid);
     assert.equal(payload.listener.queuePath, queuePath);
     assert.equal(payload.listener.enqueuedCount, 3);
+    assert.deepEqual(payload.listener.scheduler, {
+      activeSessions: ["session_a"],
+      recoveryRunning: false,
+      lastRecoveryAt: "2026-05-15T00:01:00.000Z",
+      lastRecoveredCount: 2
+    });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

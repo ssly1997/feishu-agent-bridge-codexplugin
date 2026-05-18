@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import {
   getChatSessionBinding,
@@ -667,6 +668,112 @@ writeFileSync(outputPath, "新会话已创建");
     assert.equal(recorded.prompt, "先了解当前项目");
     assert.ok(recorded.args.includes("--cd"));
     assert.ok(recorded.args.includes(await realpath(projectRoot)));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener confirms new session creation before the initialization command exits", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-new-session-early-"));
+  const projectRoot = join(dir, "project");
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const dbPath = join(dir, "state.sqlite");
+  const scriptPath = join(dir, "fake-codex.mjs");
+  const releasePath = join(dir, "release");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await mkdir(projectRoot, { recursive: true });
+    await execFileAsync("sqlite3", [
+      dbPath,
+      `
+create table threads (
+  id text primary key,
+  title text not null,
+  cwd text not null,
+  source text not null,
+  updated_at integer not null,
+  created_at integer not null,
+  archived integer not null,
+  model text,
+  git_branch text,
+  rollout_path text,
+  first_user_message text
+);
+insert into threads values ('session_current', '当前会话', '${projectRoot.replaceAll("'", "''")}', 'codex', 2000, 1000, 0, 'gpt-5', 'main', '', '当前需求');
+`
+    ]);
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
+const args = process.argv.slice(2);
+const outputPath = args[args.indexOf("-o") + 1];
+const prompt = readFileSync(0, "utf8").trim();
+const sql = "insert into threads values ('session_fresh', '继续优化插件', " +
+  ${JSON.stringify(`'${projectRoot.replaceAll("'", "''")}'`)} +
+  ", 'codex', 3000, 3000, 0, 'gpt-5', 'main', '', '" + prompt.replaceAll("'", "''") + "');";
+execFileSync("sqlite3", [${JSON.stringify(dbPath)}, sql]);
+while (!existsSync(${JSON.stringify(releasePath)})) {
+  await delay(20);
+}
+writeFileSync(outputPath, "初始化完成");
+`,
+      "utf8"
+    );
+    await chmod(scriptPath, 0o755);
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        command: scriptPath,
+        stateDbPath: dbPath,
+        outputDir: join(dir, "codex-output"),
+        timeoutMs: 5000
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+    const project = (await listCodexProjects(config.codex))[0];
+    await upsertChatSessionBinding(queuePath, {
+      chatId: "oc_test",
+      chatType: "group",
+      session: project.latestSession
+    });
+
+    const handling = invokeMessageReceive(listener, makeMessageEvent({
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> new-session 继续优化插件"
+      }),
+      mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
+    }), config, client);
+
+    for (let attempt = 0; attempt < 50 && client.texts.length < 2; attempt += 1) {
+      await delay(20);
+    }
+    const binding = await getChatSessionBinding(queuePath, "oc_test");
+    assert.equal(binding?.sessionId, "session_fresh");
+    assert.equal(binding?.sessionTitle, "继续优化插件");
+    assert.equal(client.texts.length, 2);
+    assert.match(client.texts[1].text, /已在当前 project 下创建并绑定新的 active session/);
+    assert.match(client.texts[1].text, /初始化指令仍在执行/);
+    assert.doesNotMatch(client.texts[1].text, /请不要调用任何飞书发送工具/);
+
+    await writeFile(releasePath, "done", "utf8");
+    await handling;
+
+    assert.equal(client.texts.length, 3);
+    assert.match(client.texts[2].text, /新会话初始化指令已完成/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

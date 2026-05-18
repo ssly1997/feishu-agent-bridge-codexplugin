@@ -4,6 +4,7 @@ import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { buildCodexProjectId, formatProjectDisplayLabel } from "./codexSessions.js";
 const execFileAsync = promisify(execFile);
+const SQLITE_BUSY_TIMEOUT_MS = 5000;
 export async function getChatSessionBinding(queuePath, chatId) {
     await ensureChatSessionBindingSchema(queuePath);
     const rows = await sqliteJson(queuePath, `select * from chat_session_bindings where chat_id = ${sqlValue(chatId)} limit 1;`);
@@ -202,14 +203,17 @@ export async function ensureChatSessionBindingSchema(queuePath) {
        on chat_session_bindings(project_id, updated_at);`);
 }
 async function sqliteExec(queuePath, sql) {
-    await execFileAsync("sqlite3", [queuePath, sql], { maxBuffer: 10 * 1024 * 1024 });
+    await execFileAsync("sqlite3", sqliteArgs(queuePath, sql), { maxBuffer: 10 * 1024 * 1024 });
 }
 async function sqliteJson(queuePath, sql) {
-    const { stdout } = await execFileAsync("sqlite3", ["-json", queuePath, sql], {
+    const { stdout } = await execFileAsync("sqlite3", ["-json", ...sqliteArgs(queuePath, sql)], {
         maxBuffer: 10 * 1024 * 1024
     });
     const trimmed = stdout.trim();
     return trimmed ? JSON.parse(trimmed) : [];
+}
+function sqliteArgs(queuePath, sql) {
+    return ["-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, queuePath, sql];
 }
 function rowToBinding(row) {
     const legacyProject = row.project_id ? undefined : fallbackProjectFromSessionCwd(row.session_cwd);

@@ -32,6 +32,7 @@ import {
   type CodexSessionListMode
 } from "./codexSessions.js";
 import { runCodexNewSession } from "./codexCli.js";
+import type { CodexResumeResult } from "./codexCli.js";
 import { FeishuClient } from "./feishuClient.js";
 import {
   buildCodexHelpCard,
@@ -49,11 +50,7 @@ const DEFAULT_IMAGE_TASK_TEXT = "请识别并分析这张图片。";
 const SESSION_PAGE_SIZE = 10;
 const NEW_SESSION_DISCOVERY_RETRIES = 12;
 const NEW_SESSION_DISCOVERY_INTERVAL_MS = 250;
-const DEFAULT_NEW_SESSION_PROMPT = [
-  "你正在初始化一个来自飞书群聊的 Codex 新会话。",
-  "请不要调用任何飞书发送工具；外层 feishu-agent-bridge 会负责通知用户。",
-  "只需要简短回复：新会话已创建。"
-].join("\n");
+const DEFAULT_NEW_SESSION_PROMPT = "新会话初始化";
 
 export type MessageReceiveEvent = Parameters<
   NonNullable<EventHandles["im.message.receive_v1"]>
@@ -993,17 +990,48 @@ export class FeishuCommandListener {
       config.codex.outputDir ?? join(CONFIG_DIR, "codex-output"),
       `new-session-${safePathSegment(chat.chatId)}-${Date.now()}.txt`
     );
-    const result = await runCodexNewSession(prompt?.trim() || DEFAULT_NEW_SESSION_PROMPT, config.codex, {
+    const runState: {
+      done: boolean;
+      result?: CodexResumeResult;
+      error?: unknown;
+    } = { done: false };
+    const runResultPromise = runCodexNewSession(prompt?.trim() || DEFAULT_NEW_SESSION_PROMPT, config.codex, {
       cwd: projectRootPath,
       outputPath
+    }).then((result) => {
+      runState.done = true;
+      runState.result = result;
+      return result;
+    }, (error: unknown) => {
+      runState.done = true;
+      runState.error = error;
+      return undefined;
     });
-    const session = await this.findCreatedProjectSession(
+    let session = await this.findCreatedProjectSession(
       config,
       binding.projectId,
       beforeIds,
       startedAtSeconds
     );
     if (!session) {
+      const result = await runResultPromise;
+      session = await this.findCreatedProjectSession(
+        config,
+        binding.projectId,
+        beforeIds,
+        startedAtSeconds
+      );
+      if (session) {
+        await this.sendNewSessionCreatedMessage(
+          config,
+          queuePath,
+          chat,
+          session,
+          feishuClient,
+          runState
+        );
+        return;
+      }
       await feishuClient.sendTextMessage(
         config,
         {
@@ -1011,16 +1039,59 @@ export class FeishuCommandListener {
           receiveId: chat.chatId
         },
         [
-          result.ok ? "Codex CLI 已返回，但暂未在本地 state DB 中识别到新会话。" : "Codex CLI 创建新会话失败。",
-          summarizeCodexNewSessionResult(result),
+          runState.error
+            ? "Codex CLI 创建新会话失败。"
+            : result?.ok
+              ? "Codex CLI 已返回，但暂未在本地 state DB 中识别到新会话。"
+              : "Codex CLI 创建新会话失败。",
+          result ? summarizeCodexNewSessionResult(result) : formatError(runState.error),
           "",
           "请稍后发送 list-session 查看是否已落盘，或重试 new-session。"
-        ].join("\n")
+        ].filter((line): line is string => Boolean(line)).join("\n")
       );
       return;
     }
 
+    const creationMessageIncludedRunResult = await this.sendNewSessionCreatedMessage(
+      config,
+      queuePath,
+      chat,
+      session,
+      feishuClient,
+      runState
+    );
+    if (!creationMessageIncludedRunResult) {
+      const result = await runResultPromise;
+      await feishuClient.sendTextMessage(
+        config,
+        {
+          receiveIdType: "chat_id",
+          receiveId: chat.chatId
+        },
+        [
+          result?.ok
+            ? "新会话初始化指令已完成。"
+            : "新会话已创建并绑定，但初始化指令执行未正常完成。",
+          result ? summarizeCodexNewSessionResult(result) : formatError(runState.error)
+        ].filter((line): line is string => Boolean(line)).join("\n")
+      );
+    }
+  }
+
+  private async sendNewSessionCreatedMessage(
+    config: BridgeConfig,
+    queuePath: string,
+    chat: { chatId: string; chatType?: string },
+    session: CodexSession,
+    feishuClient: FeishuClient,
+    runState: {
+      done: boolean;
+      result?: CodexResumeResult;
+      error?: unknown;
+    }
+  ): Promise<boolean> {
     const summary = await this.bindChatToSession(config, queuePath, chat, session, feishuClient);
+    const includesRunResult = runState.done;
     await feishuClient.sendTextMessage(
       config,
       {
@@ -1031,10 +1102,17 @@ export class FeishuCommandListener {
         "已在当前 project 下创建并绑定新的 active session。",
         "",
         summary,
-        "",
-        summarizeCodexNewSessionResult(result)
-      ].join("\n")
+        !includesRunResult ? "" : undefined,
+        !includesRunResult ? "初始化指令仍在执行，完成后会再同步结果。" : undefined,
+        includesRunResult && runState.result ? "" : undefined,
+        includesRunResult && runState.result ? summarizeCodexNewSessionResult(runState.result) : undefined,
+        includesRunResult && runState.error ? "" : undefined,
+        includesRunResult && runState.error
+          ? `Codex CLI 已创建会话，但初始化指令返回异常：${formatError(runState.error)}`
+          : undefined
+      ].filter((line): line is string => line !== undefined).join("\n")
     );
+    return includesRunResult;
   }
 
   private async findCreatedProjectSession(

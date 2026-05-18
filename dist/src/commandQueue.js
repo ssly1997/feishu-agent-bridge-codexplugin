@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { ensureChatSessionBindingSchema } from "./chatBindings.js";
 import { CONFIG_DIR } from "./config.js";
 const execFileAsync = promisify(execFile);
+const SQLITE_BUSY_TIMEOUT_MS = 5000;
 export const DEFAULT_COMMAND_QUEUE_DB_PATH = join(CONFIG_DIR, "commands.db");
 export const DEFAULT_LEGACY_COMMAND_QUEUE_PATH = join(CONFIG_DIR, "commands.json");
 export const DEFAULT_COMMAND_QUEUE_PATH = DEFAULT_COMMAND_QUEUE_DB_PATH;
@@ -200,6 +201,9 @@ export async function getPendingSessionIds(queuePath = DEFAULT_COMMAND_QUEUE_DB_
     return rows.map((row) => row.sessionId);
 }
 export async function recoverInProgressCommands(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH, options) {
+    return (await recoverInProgressCommandRecords(queuePath, options)).length;
+}
+export async function recoverInProgressCommandRecords(queuePath = DEFAULT_COMMAND_QUEUE_DB_PATH, options) {
     await ensureSchema(queuePath);
     const cutoff = new Date((options.now?.() ?? Date.now()) - options.timeoutMs).toISOString();
     const nextState = options.recovery === "reset_pending" ? "pending" : "failed";
@@ -207,7 +211,7 @@ export async function recoverInProgressCommands(queuePath = DEFAULT_COMMAND_QUEU
     const claimedAt = options.recovery === "reset_pending" ? "null" : "claimed_at";
     const summary = options.recovery === "reset_pending"
         ? "result_summary"
-        : sqlValue(`Recovered stale in_progress command after ${options.timeoutMs}ms`);
+        : sqlValue(options.summary ?? `Recovered stale in_progress command after ${options.timeoutMs}ms`);
     const rows = await sqliteJson(queuePath, `begin immediate;
      update commands
      set state = ${sqlValue(nextState)},
@@ -216,10 +220,10 @@ export async function recoverInProgressCommands(queuePath = DEFAULT_COMMAND_QUEU
          result_summary = ${summary}
      where state = 'in_progress'
        and claimed_at is not null
-       and claimed_at < ${sqlValue(cutoff)};
-     select changes() as changed;
+       and claimed_at < ${sqlValue(cutoff)}
+     returning *;
      commit;`);
-    return rows[0]?.changed ?? 0;
+    return rows.map(rowToCommand);
 }
 async function migrateLegacyJsonQueue(queuePath, legacyJsonPath) {
     let raw;
@@ -349,14 +353,17 @@ async function ensureCommandStatusColumns(queuePath) {
     }
 }
 async function sqliteExec(queuePath, sql) {
-    await execFileAsync("sqlite3", [queuePath, sql], { maxBuffer: 10 * 1024 * 1024 });
+    await execFileAsync("sqlite3", sqliteArgs(queuePath, sql), { maxBuffer: 10 * 1024 * 1024 });
 }
 async function sqliteJson(queuePath, sql) {
-    const { stdout } = await execFileAsync("sqlite3", ["-json", queuePath, sql], {
+    const { stdout } = await execFileAsync("sqlite3", ["-json", ...sqliteArgs(queuePath, sql)], {
         maxBuffer: 10 * 1024 * 1024
     });
     const trimmed = stdout.trim();
     return trimmed ? JSON.parse(trimmed) : [];
+}
+function sqliteArgs(queuePath, sql) {
+    return ["-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, queuePath, sql];
 }
 function pendingWhere(sessionId) {
     const base = "state = 'pending'";
