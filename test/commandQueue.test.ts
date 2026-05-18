@@ -192,13 +192,16 @@ test("command queue stores attachments and chat session bindings", async () => {
         source: "vscode",
         updatedAt: 2000,
         createdAt: 1000,
-        gitBranch: "main"
+        gitBranch: "main",
+        model: "gpt-5.4-mini"
       }
     });
     assert.equal((await getChatSessionBinding(queuePath, "oc_test"))?.sessionId, "session_image");
     assert.equal((await getChatSessionBinding(queuePath, "oc_test"))?.chatName, "图片测试群");
+    assert.equal((await getChatSessionBinding(queuePath, "oc_test"))?.sessionModel, "gpt-5.4-mini");
     const commandSession = bindingToCommandSession(binding);
     assert.ok(commandSession);
+    assert.equal(commandSession.model, "gpt-5.4-mini");
 
     const result = await enqueueCommand(
       {
@@ -231,6 +234,7 @@ test("command queue stores attachments and chat session bindings", async () => {
     assert.equal(commands[0].attachments?.length, 1);
     assert.equal(commands[0].attachments?.[0].resourceKey, "img_key");
     assert.equal(commands[0].sessionCwd, "/tmp/image");
+    assert.equal(commands[0].model, "gpt-5.4-mini");
     assert.equal(commands[0].projectDisplayLabel, "image");
 
     await upsertChatSessionBinding(queuePath, {

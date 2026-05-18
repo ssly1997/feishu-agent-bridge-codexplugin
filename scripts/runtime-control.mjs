@@ -17,6 +17,11 @@ const args = process.argv.slice(2);
 const action = args.find((arg) => !arg.startsWith("--")) ?? "ensure";
 const quiet = args.includes("--quiet");
 const skipLegacyMigration = args.includes("--no-migrate-legacy");
+const force = args.includes("--force");
+const waitIdle = args.includes("--wait-idle");
+const restartDelayMs = readNumberOption("delay-ms", 0);
+const idleTimeoutMs = readNumberOption("idle-timeout-ms", 120_000);
+const idlePollMs = readNumberOption("idle-poll-ms", 1_000);
 
 try {
   switch (action) {
@@ -27,6 +32,9 @@ try {
       await startRuntime({ restart: false });
       break;
     case "restart":
+      if (!(await prepareRestart())) {
+        break;
+      }
       await startRuntime({ restart: true });
       break;
     case "stop":
@@ -67,6 +75,62 @@ async function ensureRuntime() {
   }
 
   await startRuntime({ restart: true });
+}
+
+async function prepareRestart() {
+  if (restartDelayMs > 0) {
+    await sleep(restartDelayMs);
+  }
+
+  if (force) {
+    return true;
+  }
+
+  if (waitIdle) {
+    const idle = await waitForRuntimeIdle({
+      timeoutMs: idleTimeoutMs,
+      pollMs: idlePollMs
+    });
+    if (idle.ok) {
+      return true;
+    }
+    log({
+      action,
+      started: false,
+      reason: "active_sessions",
+      activeSessions: idle.activeSessions,
+      timeoutMs: idleTimeoutMs,
+      hint: "runtime restart skipped; retry after tasks finish or pass --force"
+    });
+    return false;
+  }
+
+  const activeSessions = activeSessionsFromStatus(await readRuntimeStatus());
+  if (activeSessions.length > 0) {
+    log({
+      action,
+      started: false,
+      reason: "active_sessions",
+      activeSessions,
+      hint: "runtime restart skipped; use --wait-idle for a safe refresh or --force to interrupt"
+    });
+    return false;
+  }
+
+  return true;
+}
+
+async function waitForRuntimeIdle(options) {
+  const deadline = Date.now() + options.timeoutMs;
+  let activeSessions = activeSessionsFromStatus(await readRuntimeStatus());
+  while (activeSessions.length > 0 && Date.now() < deadline) {
+    await sleep(options.pollMs);
+    activeSessions = activeSessionsFromStatus(await readRuntimeStatus());
+  }
+  return {
+    ok: activeSessions.length === 0,
+    activeSessions
+  };
 }
 
 async function startRuntime(options) {
@@ -115,6 +179,24 @@ async function startRuntime(options) {
     logPath: runtimeLogPath,
     runtime: status
   });
+}
+
+function activeSessionsFromStatus(status) {
+  const activeSessions = status?.scheduler?.activeSessions;
+  if (!Array.isArray(activeSessions)) return [];
+  return activeSessions.filter((item) => typeof item === "string" && item);
+}
+
+function readNumberOption(name, fallback) {
+  const prefix = `--${name}=`;
+  const value = args.find((arg) => arg.startsWith(prefix));
+  if (!value) return fallback;
+  const parsed = Number(value.slice(prefix.length));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function stopRuntime() {

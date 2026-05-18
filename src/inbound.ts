@@ -13,6 +13,7 @@ import {
   getChatSessionBinding,
   listChatSessionBindingsBySession,
   updateChatSessionBindingChatName,
+  updateChatSessionBindingModel,
   upsertChatSessionBinding
 } from "./chatBindings.js";
 import { assertAppCredentialsReady, ConfigError, CONFIG_DIR, CONFIG_PATH, loadConfig } from "./config.js";
@@ -36,6 +37,7 @@ import {
   type CodexSessionListMode
 } from "./codexSessions.js";
 import { readCodexMcpList } from "./codexMcp.js";
+import { resolveCodexModelStatus } from "./codexModels.js";
 import { runCodexNewSession } from "./codexCli.js";
 import type { CodexResumeResult } from "./codexCli.js";
 import { FeishuClient } from "./feishuClient.js";
@@ -48,6 +50,7 @@ import {
 import {
   buildCodexFeatureDetailCard,
   buildCodexFeatureCard,
+  buildCodexModelCard,
   buildCodexMcpListCard,
   buildCodexHelpCard,
   buildCodexProjectListCard,
@@ -182,9 +185,9 @@ export class FeishuCommandListener {
         await this.handleMessageReceive(data, config, feishuClient);
       },
       "card.action.trigger": async (data: unknown) => {
-        await this.handleCardAction(data, feishuClient);
+        return await this.handleCardAction(data, feishuClient);
       }
-    } as EventHandles & Record<string, (data: unknown) => Promise<void>>);
+    } as EventHandles & Record<string, (data: unknown) => Promise<unknown>>);
 
     this.wsClient = new lark.WSClient({
       appId: config.appId ?? "",
@@ -477,6 +480,11 @@ export class FeishuCommandListener {
     const statusUpdatedAt = new Date().toISOString();
     try {
       const gitBranch = await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
+      const modelStatus = await resolveCodexModelStatus({
+        sessionModel: command.model,
+        bridgeModel: config.codex.model,
+        codexCommand: config.codex.command
+      });
       const result = await feishuClient.sendInteractiveMessageToReceiver(
         config,
         {
@@ -487,7 +495,10 @@ export class FeishuCommandListener {
           phase: "queued",
           progressSummary: statusSummary,
           nowMs: Date.parse(statusUpdatedAt),
-          gitBranch
+          gitBranch,
+          model: modelStatus.effectiveModel,
+          reasoningEffort: modelStatus.reasoningEffort,
+          fastModeEnabled: modelStatus.fastModeEnabled
         })
       );
       const updated = await updateCommandStatusMetadata(command.id, queuePath, {
@@ -573,7 +584,7 @@ export class FeishuCommandListener {
           sessionTitle: binding?.sessionTitle,
           sessionId: binding?.sessionId,
           isTemporary: binding?.projectKind === "temporary",
-          model: config.codex.model,
+          model: binding?.sessionModel ?? config.codex.model,
           profile: config.codex.profile,
           sandbox: config.codex.sandbox
         })
@@ -592,6 +603,18 @@ export class FeishuCommandListener {
           isTemporary: binding?.projectKind === "temporary",
           ...(await readCodexMcpList(config.codex))
         })
+        : control.feature === "model"
+          ? buildCodexModelCard({
+            projectLabel: binding?.projectDisplayLabel,
+            sessionTitle: binding?.sessionTitle,
+            sessionId: binding?.sessionId,
+            isTemporary: binding?.projectKind === "temporary",
+            modelStatus: await resolveCodexModelStatus({
+              sessionModel: binding?.sessionModel,
+              bridgeModel: config.codex.model,
+              codexCommand: config.codex.command
+            })
+          })
         : buildCodexFeatureDetailCard(control.feature, {
           projectLabel: binding?.projectDisplayLabel,
           sessionTitle: binding?.sessionTitle,
@@ -871,7 +894,7 @@ export class FeishuCommandListener {
     );
   }
 
-  private async handleCardAction(data: unknown, feishuClient: FeishuClient): Promise<void> {
+  private async handleCardAction(data: unknown, feishuClient: FeishuClient): Promise<Record<string, unknown> | undefined> {
     this.lastEventAt = new Date().toISOString();
     const event = lark.normalizeCardAction(data as Parameters<typeof lark.normalizeCardAction>[0], {
       includeRaw: true
@@ -897,14 +920,14 @@ export class FeishuCommandListener {
       return;
     }
 
-    await this.completeCardAction(event, action, feishuClient);
+    return await this.completeCardAction(event, action, feishuClient);
   }
 
   private async completeCardAction(
     event: NormalizedCardActionEvent,
     action: NonNullable<ReturnType<typeof parseCodexCardActionValue>>,
     feishuClient: FeishuClient
-  ): Promise<void> {
+  ): Promise<Record<string, unknown> | undefined> {
     try {
       const configPath = this.options.configPath ?? CONFIG_PATH;
       const config = await loadConfig(configPath);
@@ -955,6 +978,43 @@ export class FeishuCommandListener {
           feishuClient
         );
         return;
+      }
+
+      if (action.type === "set-model" || action.type === "clear-model") {
+        const requestedSessionModel = action.type === "set-model" ? action.model : undefined;
+        const binding = await updateChatSessionBindingModel(
+          queuePath,
+          event.chatId,
+          requestedSessionModel
+        );
+        const renderedSessionModel = binding ? requestedSessionModel : undefined;
+        const modelStatus = await resolveCodexModelStatus({
+          sessionModel: renderedSessionModel,
+          bridgeModel: config.codex.model,
+          codexCommand: config.codex.command
+        });
+        const card = buildCodexModelCard({
+          projectLabel: binding?.projectDisplayLabel,
+          sessionTitle: binding?.sessionTitle,
+          sessionId: binding?.sessionId,
+          isTemporary: binding?.projectKind === "temporary",
+          modelStatus,
+          updatedModel: binding ? renderedSessionModel || "" : undefined
+        });
+        stderrLogger.info(
+          "[card]",
+          "responded codex model card",
+          JSON.stringify({
+            action: action.type,
+            storedModel: binding?.sessionModel,
+            renderedSessionModel,
+            renderedModel: modelStatus.effectiveModel,
+            messageId: event.messageId,
+            chatId: event.chatId,
+            operatorOpenId: event.operator.openId
+          })
+        );
+        return buildCardActionUpdateResponse(card);
       }
 
       if (action.type === "run-command") {
@@ -1758,6 +1818,15 @@ export async function getCommandListenerSnapshot(configPath = CONFIG_PATH): Prom
       ignoredCount: 0
     },
     queue: await getCommandQueueStats(queuePath)
+  };
+}
+
+function buildCardActionUpdateResponse(card: Record<string, unknown>): Record<string, unknown> {
+  return {
+    card: {
+      type: "raw",
+      data: card
+    }
   };
 }
 

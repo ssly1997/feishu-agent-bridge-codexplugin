@@ -20,6 +20,9 @@ export function parseCodexSessionControlCommand(text) {
     if (/^(?:features?|menu|commands?|功能|功能面板|菜单|能力|能力列表)$/i.test(trimmed)) {
         return { type: "features" };
     }
+    if (/^(?:model|模型)$/i.test(trimmed)) {
+        return { type: "feature-detail", feature: "model" };
+    }
     const featureDetailMatch = trimmed.match(/^(?:feature|功能)\s+(.+)$/i);
     if (featureDetailMatch?.[1]) {
         const feature = normalizeFeatureKey(featureDetailMatch[1]);

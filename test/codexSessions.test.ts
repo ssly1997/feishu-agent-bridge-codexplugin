@@ -202,6 +202,14 @@ test("parseCodexSessionControlCommand recognizes current and switch aliases", ()
   assert.deepEqual(parseCodexSessionControlCommand("menu"), {
     type: "features"
   });
+  assert.deepEqual(parseCodexSessionControlCommand("model"), {
+    type: "feature-detail",
+    feature: "model"
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("模型"), {
+    type: "feature-detail",
+    feature: "model"
+  });
   assert.deepEqual(parseCodexSessionControlCommand("feature mcp"), {
     type: "feature-detail",
     feature: "mcp"

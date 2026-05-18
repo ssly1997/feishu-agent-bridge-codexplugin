@@ -2,15 +2,16 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { clearChatActiveSession, deleteChatSessionBinding, bindingToCommandSession, formatCurrentChatProject, formatCurrentChatSession, getChatSessionBinding, listChatSessionBindingsBySession, updateChatSessionBindingChatName, upsertChatSessionBinding } from "./chatBindings.js";
+import { clearChatActiveSession, deleteChatSessionBinding, bindingToCommandSession, formatCurrentChatProject, formatCurrentChatSession, getChatSessionBinding, listChatSessionBindingsBySession, updateChatSessionBindingChatName, updateChatSessionBindingModel, upsertChatSessionBinding } from "./chatBindings.js";
 import { assertAppCredentialsReady, ConfigError, CONFIG_DIR, CONFIG_PATH, loadConfig } from "./config.js";
 import { enqueueCommand, getCommandQueueStats, listCommands, resolveCommandQueuePath, updateCommandStatusMetadata } from "./commandQueue.js";
 import { findCodexSession, findCodexProject, formatSelectedSessionWithSummary, listCodexProjects, listCodexSessions, parseCodexSessionControlCommand } from "./codexSessions.js";
 import { readCodexMcpList } from "./codexMcp.js";
+import { resolveCodexModelStatus } from "./codexModels.js";
 import { runCodexNewSession } from "./codexCli.js";
 import { FeishuClient } from "./feishuClient.js";
 import { formatGitBranchLine, formatGitBranchValueForCwd, readGitWorkingTreeStatus } from "./gitStatus.js";
-import { buildCodexFeatureDetailCard, buildCodexFeatureCard, buildCodexMcpListCard, buildCodexHelpCard, buildCodexProjectListCard, buildCodexSessionListCard, parseCodexCardActionValue } from "./sessionCard.js";
+import { buildCodexFeatureDetailCard, buildCodexFeatureCard, buildCodexModelCard, buildCodexMcpListCard, buildCodexHelpCard, buildCodexProjectListCard, buildCodexSessionListCard, parseCodexCardActionValue } from "./sessionCard.js";
 import { buildCommandStatusCard } from "./statusCard.js";
 import { readStandaloneListenerRuntimeStatus } from "./listenerRuntime.js";
 const IMAGE_CANDIDATE_TTL_MS = 5 * 60 * 1000;
@@ -63,7 +64,7 @@ export class FeishuCommandListener {
                 await this.handleMessageReceive(data, config, feishuClient);
             },
             "card.action.trigger": async (data) => {
-                await this.handleCardAction(data, feishuClient);
+                return await this.handleCardAction(data, feishuClient);
             }
         });
         this.wsClient = new lark.WSClient({
@@ -282,6 +283,11 @@ export class FeishuCommandListener {
         const statusUpdatedAt = new Date().toISOString();
         try {
             const gitBranch = await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
+            const modelStatus = await resolveCodexModelStatus({
+                sessionModel: command.model,
+                bridgeModel: config.codex.model,
+                codexCommand: config.codex.command
+            });
             const result = await feishuClient.sendInteractiveMessageToReceiver(config, {
                 receiveIdType: "chat_id",
                 receiveId: command.chatId
@@ -289,7 +295,10 @@ export class FeishuCommandListener {
                 phase: "queued",
                 progressSummary: statusSummary,
                 nowMs: Date.parse(statusUpdatedAt),
-                gitBranch
+                gitBranch,
+                model: modelStatus.effectiveModel,
+                reasoningEffort: modelStatus.reasoningEffort,
+                fastModeEnabled: modelStatus.fastModeEnabled
             }));
             const updated = await updateCommandStatusMetadata(command.id, queuePath, {
                 statusMessageId: result.messageId,
@@ -348,7 +357,7 @@ export class FeishuCommandListener {
                 sessionTitle: binding?.sessionTitle,
                 sessionId: binding?.sessionId,
                 isTemporary: binding?.projectKind === "temporary",
-                model: config.codex.model,
+                model: binding?.sessionModel ?? config.codex.model,
                 profile: config.codex.profile,
                 sandbox: config.codex.sandbox
             }));
@@ -365,12 +374,24 @@ export class FeishuCommandListener {
                     isTemporary: binding?.projectKind === "temporary",
                     ...(await readCodexMcpList(config.codex))
                 })
-                : buildCodexFeatureDetailCard(control.feature, {
-                    projectLabel: binding?.projectDisplayLabel,
-                    sessionTitle: binding?.sessionTitle,
-                    sessionId: binding?.sessionId,
-                    isTemporary: binding?.projectKind === "temporary"
-                });
+                : control.feature === "model"
+                    ? buildCodexModelCard({
+                        projectLabel: binding?.projectDisplayLabel,
+                        sessionTitle: binding?.sessionTitle,
+                        sessionId: binding?.sessionId,
+                        isTemporary: binding?.projectKind === "temporary",
+                        modelStatus: await resolveCodexModelStatus({
+                            sessionModel: binding?.sessionModel,
+                            bridgeModel: config.codex.model,
+                            codexCommand: config.codex.command
+                        })
+                    })
+                    : buildCodexFeatureDetailCard(control.feature, {
+                        projectLabel: binding?.projectDisplayLabel,
+                        sessionTitle: binding?.sessionTitle,
+                        sessionId: binding?.sessionId,
+                        isTemporary: binding?.projectKind === "temporary"
+                    });
             await feishuClient.sendInteractiveMessageToReceiver(config, {
                 receiveIdType: "chat_id",
                 receiveId: command.chatId
@@ -563,7 +584,7 @@ export class FeishuCommandListener {
             }));
             return;
         }
-        await this.completeCardAction(event, action, feishuClient);
+        return await this.completeCardAction(event, action, feishuClient);
     }
     async completeCardAction(event, action, feishuClient) {
         try {
@@ -597,6 +618,34 @@ export class FeishuCommandListener {
             if (action.type === "enqueue-command") {
                 await this.enqueueCardCommand(config, queuePath, event, action.command, feishuClient);
                 return;
+            }
+            if (action.type === "set-model" || action.type === "clear-model") {
+                const requestedSessionModel = action.type === "set-model" ? action.model : undefined;
+                const binding = await updateChatSessionBindingModel(queuePath, event.chatId, requestedSessionModel);
+                const renderedSessionModel = binding ? requestedSessionModel : undefined;
+                const modelStatus = await resolveCodexModelStatus({
+                    sessionModel: renderedSessionModel,
+                    bridgeModel: config.codex.model,
+                    codexCommand: config.codex.command
+                });
+                const card = buildCodexModelCard({
+                    projectLabel: binding?.projectDisplayLabel,
+                    sessionTitle: binding?.sessionTitle,
+                    sessionId: binding?.sessionId,
+                    isTemporary: binding?.projectKind === "temporary",
+                    modelStatus,
+                    updatedModel: binding ? renderedSessionModel || "" : undefined
+                });
+                stderrLogger.info("[card]", "responded codex model card", JSON.stringify({
+                    action: action.type,
+                    storedModel: binding?.sessionModel,
+                    renderedSessionModel,
+                    renderedModel: modelStatus.effectiveModel,
+                    messageId: event.messageId,
+                    chatId: event.chatId,
+                    operatorOpenId: event.operator.openId
+                }));
+                return buildCardActionUpdateResponse(card);
             }
             if (action.type === "run-command") {
                 const control = parseCodexSessionControlCommand(action.command);
@@ -1143,6 +1192,14 @@ export async function getCommandListenerSnapshot(configPath = CONFIG_PATH) {
             ignoredCount: 0
         },
         queue: await getCommandQueueStats(queuePath)
+    };
+}
+function buildCardActionUpdateResponse(card) {
+    return {
+        card: {
+            type: "raw",
+            data: card
+        }
     };
 }
 function paginate(items, requestedPage, pageSize) {

@@ -11,6 +11,7 @@ import {
   type CodexCommandProcessResult
 } from "./codexWorker.js";
 import { formatGitBranchValueForCwd } from "./gitStatus.js";
+import { resolveCodexModelStatus } from "./codexModels.js";
 import { buildCommandStatusCard } from "./statusCard.js";
 import type { AgentCommand, BridgeConfig } from "./types.js";
 
@@ -176,6 +177,11 @@ export class CodexRuntimeScheduler {
     try {
       const phase = command.state === "failed" ? "failed" : "queued";
       const gitBranch = await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
+      const modelStatus = await resolveCodexModelStatus({
+        sessionModel: command.model,
+        bridgeModel: config.codex.model,
+        codexCommand: config.codex.command
+      });
       await (this.options.feishuClient ?? new FeishuClient()).updateInteractiveMessage(
         config,
         command.statusMessageId,
@@ -184,7 +190,10 @@ export class CodexRuntimeScheduler {
           nowMs: Date.parse(statusUpdatedAt),
           progressSummary: phase === "queued" ? summary : undefined,
           resultSummary: phase === "failed" ? summary : undefined,
-          gitBranch
+          gitBranch,
+          model: modelStatus.effectiveModel,
+          reasoningEffort: modelStatus.reasoningEffort,
+          fastModeEnabled: modelStatus.fastModeEnabled
         })
       );
       await updateCommandStatusMetadata(command.id, queuePath, {

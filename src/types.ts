@@ -144,6 +144,7 @@ export interface AgentCommand {
   sessionSource?: string;
   sessionGitBranch?: string;
   sessionUpdatedAt?: number;
+  model?: string;
   projectId?: string;
   projectKind?: string;
   projectRootPath?: string;
@@ -178,6 +179,7 @@ export interface NewAgentCommand {
   sessionSource?: string;
   sessionGitBranch?: string;
   sessionUpdatedAt?: number;
+  model?: string;
   projectId?: string;
   projectKind?: string;
   projectRootPath?: string;

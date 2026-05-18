@@ -40,6 +40,11 @@ class FakeFeishuClient extends FeishuClient {
     receiver: { receiveIdType: ReceiveIdType; receiveId: string };
     card: Record<string, unknown>;
   }> = [];
+  updatedCards: Array<{
+    config: BridgeConfig;
+    messageId: string;
+    card: Record<string, unknown>;
+  }> = [];
   downloads: Array<{
     messageId: string;
     resourceKey: string;
@@ -67,6 +72,15 @@ class FakeFeishuClient extends FeishuClient {
     }
     this.cards.push({ config, receiver, card: card as Record<string, unknown> });
     return { messageId: "om_fake_card" };
+  }
+
+  override async updateInteractiveMessage(
+    config: BridgeConfig,
+    messageId: string,
+    card: unknown
+  ): Promise<{ messageId?: string }> {
+    this.updatedCards.push({ config, messageId, card: card as Record<string, unknown> });
+    return { messageId };
   }
 
   override async downloadMessageResource(
@@ -599,7 +613,7 @@ test("listener enqueues normal commands with an immutable Codex session snapshot
         cwd: "/tmp/fallback"
       }
     };
-    await bindChat(queuePath, "oc_test");
+    await bindChat(queuePath, "oc_test", "session_new", undefined, "gpt-5.4-mini");
 
     await invokeMessageReceive(listener, makeMessageEvent({
       content: JSON.stringify({
@@ -619,9 +633,14 @@ test("listener enqueues normal commands with an immutable Codex session snapshot
     assert.equal(commands[0].sessionId, "session_new");
     assert.equal(commands[0].sessionTitle, "最新会话");
     assert.equal(commands[0].sessionCwd, "/tmp/new");
+    assert.equal(commands[0].model, "gpt-5.4-mini");
     assert.equal(commands[0].statusMessageId, "om_fake_card");
     assert.match(commands[0].statusSummary ?? "", /等待 runtime 调度/);
     assert.equal(client.cards.length, 1);
+    const statusCardText = JSON.stringify(client.cards[0].card);
+    assert.match(statusCardText, /当前模型：gpt-5\.4-mini/);
+    assert.match(statusCardText, /智能等级：/);
+    assert.match(statusCardText, /快速模式：/);
     assert.equal(client.texts.length, 0);
     assert.equal(wokenSessionId, "session_new");
   } finally {
@@ -864,6 +883,190 @@ test("listener runs feature button actions", async () => {
     assert.match(cardText, /Codex 功能：代码审查/);
     assert.match(cardText, /codex review --uncommitted/);
     assert.match(cardText, /返回功能面板/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener renders model switch card for the model feature button", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-model-feature-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        model: "gpt-5.5"
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+
+    await (
+      listener as unknown as {
+        completeCardAction: (
+          event: { messageId: string; chatId: string; operator: { openId: string } },
+          action: { type: "run-command"; command: string },
+          feishuClient: FeishuClient
+        ) => Promise<void>;
+      }
+    ).completeCardAction(
+      { messageId: "om_card", chatId: "oc_test", operator: { openId: "ou_operator" } },
+      { type: "run-command", command: "feature model" },
+      client
+    );
+
+    assert.equal(client.cards.length, 1);
+    const cardText = JSON.stringify(client.cards[0].card);
+    assert.match(cardText, /Codex 功能：模型/);
+    assert.match(cardText, /Current model: gpt-5\.5/);
+    assert.match(cardText, /智能等级:/);
+    assert.match(cardText, /快速模式:/);
+    assert.match(cardText, /set_codex_model/);
+    assert.match(cardText, /GPT-5\.4 Mini/);
+    assert.doesNotMatch(cardText, /enqueue_agent_command/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener renders model switch card from direct model commands", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-model-direct-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await bindChat(queuePath, "oc_test", "session_new", "当前群", "gpt-5.4");
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        model: "gpt-5.5"
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      messageId: "om_model_direct",
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> model"
+      }),
+      mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
+    }), config, client);
+
+    assert.equal(client.texts.length, 0);
+    assert.equal(client.cards.length, 1);
+    assert.equal((await listCommands(queuePath)).length, 0);
+    const cardText = JSON.stringify(client.cards[0].card);
+    assert.match(cardText, /Codex 功能：模型/);
+    assert.match(cardText, /Current model: gpt-5\.4/);
+    assert.match(cardText, /智能等级:/);
+    assert.match(cardText, /快速模式:/);
+    assert.match(cardText, /Session override: gpt-5\.4/);
+    assert.doesNotMatch(cardText, /Codex 功能面板/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener switches Codex model from model card actions", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-model-switch-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        model: "gpt-5.5"
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+
+    const updatedCard = await (
+      listener as unknown as {
+        completeCardAction: (
+          event: { messageId: string; chatId: string; operator: { openId: string } },
+          action: { type: "set-model"; model: string },
+          feishuClient: FeishuClient
+        ) => Promise<Record<string, unknown> | undefined>;
+      }
+    ).completeCardAction(
+      { messageId: "om_model_card", chatId: "oc_test", operator: { openId: "ou_operator" } },
+      { type: "set-model", model: "gpt-5.4-mini" },
+      client
+    );
+
+    const saved = JSON.parse(await readFile(configPath, "utf8")) as BridgeConfig;
+    assert.equal(saved.codex.model, "gpt-5.5");
+    assert.equal((await getChatSessionBinding(queuePath, "oc_test"))?.sessionModel, "gpt-5.4-mini");
+    assert.equal(client.updatedCards.length, 0);
+    const cardText = JSON.stringify(updatedCard);
+    assert.match(cardText, /"type":"raw"/);
+    assert.match(cardText, /"data":/);
+    assert.match(cardText, /已切换模型：gpt-5\.4-mini/);
+    assert.match(cardText, /Current model: gpt-5\.4-mini/);
+    assert.match(cardText, /智能等级:/);
+    assert.match(cardText, /快速模式:/);
+    assert.match(cardText, /Session override: gpt-5\.4-mini/);
+    assert.match(cardText, /当前 GPT-5\.4 Mini/);
+    assert.match(cardText, /set_model_gpt-5_4-mini_gpt-5_4-mini/);
+    assert.doesNotMatch(cardText, /当前 GPT-5\.5/);
+
+    const clearedCard = await (
+      listener as unknown as {
+        completeCardAction: (
+          event: { messageId: string; chatId: string; operator: { openId: string } },
+          action: { type: "clear-model" },
+          feishuClient: FeishuClient
+        ) => Promise<Record<string, unknown> | undefined>;
+      }
+    ).completeCardAction(
+      { messageId: "om_model_card", chatId: "oc_test", operator: { openId: "ou_operator" } },
+      { type: "clear-model" },
+      client
+    );
+
+    const cleared = JSON.parse(await readFile(configPath, "utf8")) as BridgeConfig;
+    assert.equal(cleared.codex.model, "gpt-5.5");
+    assert.equal((await getChatSessionBinding(queuePath, "oc_test"))?.sessionModel, undefined);
+    assert.equal(client.updatedCards.length, 0);
+    const clearedCardText = JSON.stringify(clearedCard);
+    assert.match(clearedCardText, /"type":"raw"/);
+    assert.match(clearedCardText, /"data":/);
+    assert.match(clearedCardText, /已切换模型：使用默认模型/);
+    assert.match(clearedCardText, /Current model: gpt-5\.5/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -2030,7 +2233,8 @@ async function bindChat(
   queuePath: string,
   chatId: string,
   sessionId = "session_new",
-  chatName?: string
+  chatName?: string,
+  model?: string
 ): Promise<void> {
   await upsertChatSessionBinding(queuePath, {
     chatId,
@@ -2043,7 +2247,8 @@ async function bindChat(
       source: "vscode",
       updatedAt: 2000,
       createdAt: 1000,
-      gitBranch: sessionId === "session_new" ? "main" : undefined
+      gitBranch: sessionId === "session_new" ? "main" : undefined,
+      model
     }
   });
 }

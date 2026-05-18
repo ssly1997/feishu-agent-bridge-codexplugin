@@ -1,3 +1,4 @@
+import { getCodexModelOptions, isKnownCodexModel } from "./codexModels.js";
 const MAX_TITLE_LENGTH = 80;
 const MAX_CWD_LENGTH = 120;
 const MAX_PROJECT_LENGTH = 100;
@@ -116,7 +117,7 @@ const CODEX_FEATURE_DETAILS = {
     model: {
         label: "模型",
         status: "CLI supported",
-        detail: "CLI 支持 `codex -m <model>`，也可配置 `model`。",
+        detail: "CLI 支持 `codex -m <model>`；功能面板可为当前群绑定的 active session 设置模型 override。",
         actions: [
             {
                 label: "检查模型",
@@ -348,6 +349,31 @@ export function buildCodexFeatureDetailCard(feature, options = {}) {
     }));
     return card(`Codex 功能：${detail.label}`, "blue", elements);
 }
+export function buildCodexModelCard(options) {
+    const currentModel = options.modelStatus.effectiveModel;
+    const modelLines = [
+        `Current model: ${currentModel || "Codex default"}`,
+        `智能等级: ${formatReasoningEffort(options.modelStatus.reasoningEffort)}`,
+        `快速模式: ${formatFastModeEnabled(options.modelStatus.fastModeEnabled)}`,
+        `Session override: ${options.modelStatus.sessionModel || "(未配置)"}`,
+        `Bridge default: ${options.modelStatus.bridgeModel || "(未配置)"}`,
+        `Global default: ${options.modelStatus.globalModel || "(未配置)"}`,
+        "Scope: 仅当前群绑定 active session 的后续 Feishu 任务"
+    ];
+    const elements = [
+        markdownBlock(`**当前绑定**\n${escapeMd(formatFeatureBindingSummary(options))}`)
+    ];
+    if (options.updatedModel !== undefined) {
+        elements.push({ tag: "hr" });
+        elements.push(markdownBlock(`<font color='green'>已切换模型：${escapeMd(options.updatedModel || "使用默认模型")}</font>`));
+    }
+    elements.push({ tag: "hr" });
+    elements.push(markdownBlock(`**当前模型**\n${escapeMd(modelLines.join("\n"))}`));
+    elements.push({ tag: "hr" });
+    elements.push(markdownBlock("**可切换模型**\n点击按钮会更新当前群绑定 session 的模型，后续从飞书进入该 session 的任务会带上 `--model`。"));
+    elements.push(...modelButtonRows(currentModel, Boolean(options.modelStatus.sessionModel)));
+    return card("Codex 功能：模型", "blue", elements);
+}
 export function buildCodexMcpListCard(options) {
     const enabledCount = options.servers.filter((server) => server.status.toLowerCase() === "enabled").length;
     const disabledCount = options.servers.filter((server) => server.status.toLowerCase() === "disabled").length;
@@ -452,6 +478,19 @@ export function buildEnqueueAgentCommandActionValue(command) {
         command
     };
 }
+export function buildSetCodexModelActionValue(model) {
+    return {
+        bridge: BRIDGE_ACTION_OWNER,
+        action: "set_codex_model",
+        model
+    };
+}
+export function buildClearCodexModelActionValue() {
+    return {
+        bridge: BRIDGE_ACTION_OWNER,
+        action: "clear_codex_model"
+    };
+}
 export function parseCodexCardActionValue(value) {
     const object = parseActionObject(value);
     if (!object || object.bridge !== BRIDGE_ACTION_OWNER)
@@ -487,6 +526,15 @@ export function parseCodexCardActionValue(value) {
         if (isAllowedFeatureTaskCommand(command)) {
             return { type: "enqueue-command", command };
         }
+    }
+    if (object.action === "set_codex_model" && typeof object.model === "string") {
+        const model = object.model.trim();
+        if (isAllowedModelAction(model)) {
+            return { type: "set-model", model };
+        }
+    }
+    if (object.action === "clear_codex_model") {
+        return { type: "clear-model" };
     }
     return undefined;
 }
@@ -654,6 +702,52 @@ function featureActionRows(actions) {
     }
     return rows;
 }
+function modelButtonRows(currentModel, hasSessionOverride) {
+    const options = getCodexModelOptions(currentModel);
+    const rows = [];
+    const renderKey = safeName(currentModel || "default");
+    for (let index = 0; index < options.length; index += 2) {
+        const chunk = options.slice(index, index + 2);
+        rows.push({
+            tag: "column_set",
+            horizontal_spacing: "8px",
+            horizontal_align: "left",
+            columns: chunk.map((option) => {
+                const selected = option.id === currentModel;
+                return buttonColumn({
+                    name: `set_model_${safeName(option.id)}_${renderKey}`,
+                    type: selected ? "primary_filled" : "default",
+                    content: selected ? `当前 ${option.label}` : option.label,
+                    value: buildSetCodexModelActionValue(option.id)
+                });
+            })
+        });
+    }
+    rows.push(markdownBlock(formatModelOptionList(options)));
+    if (hasSessionOverride) {
+        rows.push(singleButtonRow({
+            name: "clear_model_override",
+            type: "default",
+            content: "使用默认模型",
+            value: buildClearCodexModelActionValue()
+        }));
+    }
+    return rows;
+}
+function formatModelOptionList(options) {
+    const lines = options.map((option) => `- ${escapeMd(option.label)}：${escapeMd(option.description)}`);
+    return lines.join("\n");
+}
+function formatReasoningEffort(value) {
+    return value || "(未配置)";
+}
+function formatFastModeEnabled(value) {
+    if (value === true)
+        return "已开启";
+    if (value === false)
+        return "未开启";
+    return "(未知)";
+}
 function singleButtonRow(options) {
     return {
         tag: "column_set",
@@ -740,6 +834,9 @@ function isAllowedHelpCommand(command) {
 function isAllowedFeatureTaskCommand(command) {
     const tasks = CODEX_FEATURE_ORDER.flatMap((key) => CODEX_FEATURE_DETAILS[key].actions.map((action) => action.task));
     return new Set(tasks).has(command);
+}
+function isAllowedModelAction(model) {
+    return isKnownCodexModel(model) || /^[a-zA-Z0-9._:-]{1,80}$/.test(model);
 }
 function formatBindingSummary(options) {
     return options.projectLabel || options.sessionId

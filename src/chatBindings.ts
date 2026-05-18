@@ -18,6 +18,7 @@ export interface ChatSessionBinding {
   sessionSource?: string;
   sessionGitBranch?: string;
   sessionUpdatedAt?: number;
+  sessionModel?: string;
   projectId?: string;
   projectKind?: string;
   projectRootPath?: string;
@@ -78,13 +79,14 @@ export async function upsertChatSessionBinding(
     queuePath,
     `insert into chat_session_bindings (
        chat_id, chat_type, chat_name, session_id, session_title, session_cwd, session_source,
-       session_git_branch, session_updated_at, project_id, project_kind, project_root_path,
+       session_git_branch, session_updated_at, session_model, project_id, project_kind, project_root_path,
        project_display_name, project_secondary_name, project_display_label, project_label_source,
        created_at, updated_at
      ) values (
        ${sqlValue(input.chatId)}, ${sqlValue(input.chatType)}, ${sqlValue(input.chatName)},
        ${sqlValue(input.session.id)}, ${sqlValue(sessionTitle)}, ${sqlValue(input.session.cwd)},
        ${sqlValue(input.session.source)}, ${sqlValue(input.session.gitBranch)}, ${sqlNumber(input.session.updatedAt)},
+       ${sqlValue(input.session.model)},
        ${sqlValue(input.session.projectId)}, ${sqlValue(input.session.projectKind)},
        ${sqlValue(input.session.projectRootPath)}, ${sqlValue(input.session.projectDisplayName)},
        ${sqlValue(input.session.projectSecondaryName)}, ${sqlValue(input.session.projectDisplayLabel)},
@@ -100,6 +102,7 @@ export async function upsertChatSessionBinding(
        session_source = excluded.session_source,
        session_git_branch = excluded.session_git_branch,
        session_updated_at = excluded.session_updated_at,
+       session_model = excluded.session_model,
        project_id = excluded.project_id,
        project_kind = excluded.project_kind,
        project_root_path = excluded.project_root_path,
@@ -145,6 +148,23 @@ export async function clearChatActiveSession(
          session_source = null,
          session_git_branch = null,
          session_updated_at = null,
+         session_model = null,
+         updated_at = ${sqlValue(new Date().toISOString())}
+     where chat_id = ${sqlValue(chatId)};`
+  );
+  return getChatSessionBinding(queuePath, chatId);
+}
+
+export async function updateChatSessionBindingModel(
+  queuePath: string,
+  chatId: string,
+  model: string | undefined
+): Promise<ChatSessionBinding | undefined> {
+  await ensureChatSessionBindingSchema(queuePath);
+  await sqliteExec(
+    queuePath,
+    `update chat_session_bindings
+     set session_model = ${sqlValue(model)},
          updated_at = ${sqlValue(new Date().toISOString())}
      where chat_id = ${sqlValue(chatId)};`
   );
@@ -168,6 +188,7 @@ export async function updateChatSessionBindingChatName(
 export function bindingToCommandSession(binding: ChatSessionBinding): Pick<
   NewAgentCommand,
   "sessionId" | "sessionTitle" | "sessionCwd" | "sessionSource" | "sessionGitBranch" | "sessionUpdatedAt" |
+  "model" |
   "projectId" | "projectKind" | "projectRootPath" | "projectDisplayName" | "projectSecondaryName" |
   "projectDisplayLabel" | "projectLabelSource"
 > | undefined {
@@ -179,6 +200,7 @@ export function bindingToCommandSession(binding: ChatSessionBinding): Pick<
     sessionSource: binding.sessionSource,
     sessionGitBranch: binding.sessionGitBranch,
     sessionUpdatedAt: binding.sessionUpdatedAt,
+    model: binding.sessionModel,
     projectId: binding.projectId,
     projectKind: binding.projectKind,
     projectRootPath: binding.projectRootPath,
@@ -268,6 +290,7 @@ export async function ensureChatSessionBindingSchema(queuePath: string): Promise
        session_source text,
        session_git_branch text,
        session_updated_at integer,
+       session_model text,
        project_id text,
        project_kind text,
        project_root_path text,
@@ -319,6 +342,7 @@ function rowToBinding(row: ChatSessionBindingRow): ChatSessionBinding {
     sessionSource: row.session_source ?? undefined,
     sessionGitBranch: row.session_git_branch ?? undefined,
     sessionUpdatedAt: row.session_updated_at ?? undefined,
+    sessionModel: row.session_model ?? undefined,
     projectId: row.project_id ?? legacyProject?.projectId,
     projectKind: row.project_kind ?? legacyProject?.projectKind,
     projectRootPath: row.project_root_path ?? legacyProject?.projectRootPath,
@@ -338,6 +362,7 @@ async function ensureChatSessionBindingColumns(queuePath: string): Promise<void>
   );
   const missing = [
     ["chat_name", "text"],
+    ["session_model", "text"],
     ["project_id", "text"],
     ["project_kind", "text"],
     ["project_root_path", "text"],
@@ -373,6 +398,7 @@ async function ensureChatSessionBindingSessionNullable(queuePath: string): Promi
        session_source text,
        session_git_branch text,
        session_updated_at integer,
+       session_model text,
        project_id text,
        project_kind text,
        project_root_path text,
@@ -385,13 +411,13 @@ async function ensureChatSessionBindingSessionNullable(queuePath: string): Promi
      );
      insert into chat_session_bindings_new (
        chat_id, chat_type, chat_name, session_id, session_title, session_cwd,
-       session_source, session_git_branch, session_updated_at, project_id, project_kind,
+       session_source, session_git_branch, session_updated_at, session_model, project_id, project_kind,
        project_root_path, project_display_name, project_secondary_name, project_display_label,
        project_label_source, created_at, updated_at
      )
      select
        chat_id, chat_type, chat_name, session_id, session_title, session_cwd,
-       session_source, session_git_branch, session_updated_at, project_id, project_kind,
+       session_source, session_git_branch, session_updated_at, session_model, project_id, project_kind,
        project_root_path, project_display_name, project_secondary_name, project_display_label,
        project_label_source, created_at, updated_at
      from chat_session_bindings;
@@ -478,6 +504,7 @@ interface ChatSessionBindingRow {
   session_source: string | null;
   session_git_branch: string | null;
   session_updated_at: number | null;
+  session_model: string | null;
   project_id: string | null;
   project_kind: string | null;
   project_root_path: string | null;

@@ -104,6 +104,10 @@ export function parseCodexSessionControlCommand(
     return { type: "features" };
   }
 
+  if (/^(?:model|模型)$/i.test(trimmed)) {
+    return { type: "feature-detail", feature: "model" };
+  }
+
   const featureDetailMatch = trimmed.match(/^(?:feature|功能)\s+(.+)$/i);
   if (featureDetailMatch?.[1]) {
     const feature = normalizeFeatureKey(featureDetailMatch[1]);

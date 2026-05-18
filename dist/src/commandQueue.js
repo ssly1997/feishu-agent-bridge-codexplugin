@@ -49,6 +49,7 @@ export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_DB
         sessionSource: input.sessionSource,
         sessionGitBranch: input.sessionGitBranch,
         sessionUpdatedAt: input.sessionUpdatedAt,
+        model: input.model,
         projectId: input.projectId,
         projectKind: input.projectKind,
         projectRootPath: input.projectRootPath,
@@ -62,7 +63,7 @@ export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_DB
     await sqliteExec(queuePath, `insert into commands (
       id, state, text, raw_text, message_id, chat_id, chat_type, sender_json, source,
       event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
-      session_source, session_git_branch, session_updated_at, project_id, project_kind,
+      session_source, session_git_branch, session_updated_at, model, project_id, project_kind,
       project_root_path, project_display_name, project_secondary_name, project_display_label,
       project_label_source, attachments_json, attempts
     ) values (
@@ -73,6 +74,7 @@ export async function enqueueCommand(input, queuePath = DEFAULT_COMMAND_QUEUE_DB
       ${sqlValue(command.createdAt)}, ${sqlValue(command.receivedAt)}, ${sqlValue(command.sessionId)},
       ${sqlValue(command.sessionTitle)}, ${sqlValue(command.sessionCwd)}, ${sqlValue(command.sessionSource)},
       ${sqlValue(command.sessionGitBranch)}, ${sqlNumber(command.sessionUpdatedAt)},
+      ${sqlValue(command.model)},
       ${sqlValue(command.projectId)}, ${sqlValue(command.projectKind)}, ${sqlValue(command.projectRootPath)},
       ${sqlValue(command.projectDisplayName)}, ${sqlValue(command.projectSecondaryName)},
       ${sqlValue(command.projectDisplayLabel)}, ${sqlValue(command.projectLabelSource)},
@@ -251,7 +253,7 @@ async function insertCommand(queuePath, command) {
       event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
       session_source, session_git_branch, session_updated_at, claimed_at, completed_at,
       attempts, result_summary, status_message_id, status_updated_at, status_notify_error,
-      status_summary, project_id, project_kind, project_root_path, project_display_name,
+      status_summary, model, project_id, project_kind, project_root_path, project_display_name,
       project_secondary_name, project_display_label, project_label_source, attachments_json
     ) values (
       ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
@@ -264,7 +266,7 @@ async function insertCommand(queuePath, command) {
       ${sqlValue(command.claimedAt)}, ${sqlValue(command.completedAt)}, ${command.attempts},
       ${sqlValue(command.resultSummary)}, ${sqlValue(command.statusMessageId)},
       ${sqlValue(command.statusUpdatedAt)}, ${sqlValue(command.statusNotifyError)},
-      ${sqlValue(command.statusSummary)}, ${sqlValue(command.projectId)}, ${sqlValue(command.projectKind)},
+      ${sqlValue(command.statusSummary)}, ${sqlValue(command.model)}, ${sqlValue(command.projectId)}, ${sqlValue(command.projectKind)},
       ${sqlValue(command.projectRootPath)}, ${sqlValue(command.projectDisplayName)},
       ${sqlValue(command.projectSecondaryName)}, ${sqlValue(command.projectDisplayLabel)},
       ${sqlValue(command.projectLabelSource)}, ${sqlValue(JSON.stringify(command.attachments ?? []))}
@@ -301,6 +303,7 @@ async function ensureSchema(queuePath) {
        session_source text,
        session_git_branch text,
        session_updated_at integer,
+       model text,
        claimed_at text,
        completed_at text,
        attempts integer not null default 0,
@@ -333,6 +336,7 @@ async function ensureCommandStatusColumns(queuePath) {
         ["status_updated_at", "text"],
         ["status_notify_error", "text"],
         ["status_summary", "text"],
+        ["model", "text"],
         ["project_id", "text"],
         ["project_kind", "text"],
         ["project_root_path", "text"],
@@ -412,6 +416,7 @@ function rowToCommand(row) {
         sessionSource: row.session_source ?? undefined,
         sessionGitBranch: row.session_git_branch ?? undefined,
         sessionUpdatedAt: row.session_updated_at ?? undefined,
+        model: row.model ?? undefined,
         projectId: row.project_id ?? undefined,
         projectKind: row.project_kind ?? undefined,
         projectRootPath: row.project_root_path ?? undefined,
@@ -463,6 +468,7 @@ function normalizeLegacyCommand(value) {
         sessionSource: stringValue(value.sessionSource),
         sessionGitBranch: stringValue(value.sessionGitBranch),
         sessionUpdatedAt: numberValue(value.sessionUpdatedAt),
+        model: stringValue(value.model),
         projectId: stringValue(value.projectId),
         projectKind: stringValue(value.projectKind),
         projectRootPath: stringValue(value.projectRootPath),

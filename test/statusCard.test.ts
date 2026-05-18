@@ -21,6 +21,7 @@ test("done status card keeps actionable conclusion details", () => {
     sessionId: "session_detail",
     sessionTitle: "继续优化插件",
     sessionCwd: "/tmp/feishu-agent-bridge",
+    model: "gpt-5.4-mini",
     attachments: [{
       type: "image",
       path: "/tmp/input.png",
@@ -35,6 +36,8 @@ test("done status card keeps actionable conclusion details", () => {
     durationMs: 424_000,
     exitCode: 0,
     outputPath: "/tmp/fcmd_detail.txt",
+    reasoningEffort: "xhigh",
+    fastModeEnabled: true,
     resultSummary: [
       "可以实现，已在分支 codex/lfc/feature-panel-card 做完。",
       "",
@@ -52,6 +55,8 @@ test("done status card keeps actionable conclusion details", () => {
   assert.match(text, /status\/status-full\/list-session/);
   assert.match(text, /验证：pnpm test 通过/);
   assert.match(text, /总耗时：7m 4s/);
+  assert.match(text, /当前模型：gpt-5\.4-mini ｜ 智能等级：xhigh ｜ 快速模式：已开启/);
+  assert.doesNotMatch(text, /当前模型：gpt-5\.4-mini\\n智能等级：xhigh/);
   assert.doesNotMatch(text, /收到时间/);
   assert.doesNotMatch(text, /认领时间/);
   assert.doesNotMatch(text, /完成时间/);

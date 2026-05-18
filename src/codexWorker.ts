@@ -22,6 +22,7 @@ import {
   type CodexSessionControlCommand
 } from "./codexSessions.js";
 import { formatGitBranchValueForCwd } from "./gitStatus.js";
+import { resolveCodexModelStatus } from "./codexModels.js";
 import { buildCommandStatusCard, type CommandStatusPhase } from "./statusCard.js";
 import type { AgentCommand, BridgeConfig, NotifyStatus } from "./types.js";
 
@@ -300,6 +301,7 @@ function codexConfigForCommand(config: BridgeConfig, command: AgentCommand): Bri
     sessionSource: command.sessionSource,
     sessionGitBranch: command.sessionGitBranch,
     sessionUpdatedAt: command.sessionUpdatedAt,
+    model: command.model ?? config.codex.model,
     cwd: command.sessionCwd,
     useLast: false
   };
@@ -397,6 +399,11 @@ async function updateCommandStatusCard(
 
   try {
     const gitBranch = await formatCommandGitBranch(config, command);
+    const modelStatus = await resolveCodexModelStatus({
+      sessionModel: command.model,
+      bridgeModel: config.codex.model,
+      codexCommand: config.codex.command
+    });
     await feishuClient.updateInteractiveMessage(
       config,
       command.statusMessageId,
@@ -410,7 +417,10 @@ async function updateCommandStatusCard(
         exitCode: options.codex?.exitCode,
         signal: options.codex?.signal,
         timedOut: options.codex?.timedOut,
-        gitBranch
+        gitBranch,
+        model: modelStatus.effectiveModel,
+        reasoningEffort: modelStatus.reasoningEffort,
+        fastModeEnabled: modelStatus.fastModeEnabled
       })
     );
     const updated = await updateCommandStatusMetadata(command.id, queuePath, {

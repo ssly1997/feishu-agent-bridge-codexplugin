@@ -10,6 +10,7 @@ export function buildCommandStatusCard(command, config, options) {
     const lines = [
         `任务状态：${phaseLabel(options.phase)}`,
         `指令摘要：${truncateSingleLine(command.text, 220)}`,
+        formatRuntimeConfigLine(command, config, options),
         command.claimedAt && options.phase === "in_progress"
             ? `已运行：${formatDuration(nowMs - Date.parse(command.claimedAt))}`
             : undefined,
@@ -115,6 +116,23 @@ function formatDuration(valueMs) {
         return `${minutes}m ${remainingSeconds}s`;
     const hours = Math.floor(minutes / 60);
     return `${hours}h ${minutes % 60}m`;
+}
+function formatRuntimeConfigLine(command, config, options) {
+    return [
+        `当前模型：${options.model || command.model || config.codex.model || "Codex default"}`,
+        `智能等级：${formatReasoningEffort(options.reasoningEffort)}`,
+        `快速模式：${formatFastModeEnabled(options.fastModeEnabled)}`
+    ].join(" ｜ ");
+}
+function formatReasoningEffort(value) {
+    return value || "(未配置)";
+}
+function formatFastModeEnabled(value) {
+    if (value === true)
+        return "已开启";
+    if (value === false)
+        return "未开启";
+    return "(未知)";
 }
 function truncateSingleLine(value, maxLength) {
     return truncateMultiline(value.replace(/\s+/g, " ").trim(), maxLength);

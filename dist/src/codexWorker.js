@@ -7,6 +7,7 @@ import { FeishuApiError, FeishuClient } from "./feishuClient.js";
 import { progressSummaryFromJsonLine, runCodexResume } from "./codexCli.js";
 import { findCodexSession, handleCodexSessionControlCommand, parseCodexSessionControlCommand } from "./codexSessions.js";
 import { formatGitBranchValueForCwd } from "./gitStatus.js";
+import { resolveCodexModelStatus } from "./codexModels.js";
 import { buildCommandStatusCard } from "./statusCard.js";
 const PROGRESS_UPDATE_INTERVAL_MS = 10_000;
 const INITIAL_CLI_HANDOFF_PROGRESS_SUMMARY = "已交接给 Codex CLI 处理。";
@@ -181,6 +182,7 @@ function codexConfigForCommand(config, command) {
         sessionSource: command.sessionSource,
         sessionGitBranch: command.sessionGitBranch,
         sessionUpdatedAt: command.sessionUpdatedAt,
+        model: command.model ?? config.codex.model,
         cwd: command.sessionCwd,
         useLast: false
     };
@@ -232,6 +234,11 @@ async function updateCommandStatusCard(config, queuePath, command, phase, status
     }
     try {
         const gitBranch = await formatCommandGitBranch(config, command);
+        const modelStatus = await resolveCodexModelStatus({
+            sessionModel: command.model,
+            bridgeModel: config.codex.model,
+            codexCommand: config.codex.command
+        });
         await feishuClient.updateInteractiveMessage(config, command.statusMessageId, buildCommandStatusCard(command, config, {
             phase,
             nowMs: options.nowMs,
@@ -242,7 +249,10 @@ async function updateCommandStatusCard(config, queuePath, command, phase, status
             exitCode: options.codex?.exitCode,
             signal: options.codex?.signal,
             timedOut: options.codex?.timedOut,
-            gitBranch
+            gitBranch,
+            model: modelStatus.effectiveModel,
+            reasoningEffort: modelStatus.reasoningEffort,
+            fastModeEnabled: modelStatus.fastModeEnabled
         }));
         const updated = await updateCommandStatusMetadata(command.id, queuePath, {
             statusUpdatedAt,

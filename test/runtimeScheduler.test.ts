@@ -208,7 +208,10 @@ test("runtime scheduler updates status cards for recovered failed commands", asy
     assert.equal(recovered, 1);
     assert.equal(client.updates.length, 1);
     assert.equal(client.updates[0].messageId, "om_status_card");
-    assert.match(JSON.stringify(client.updates[0].card), /Codex task failed/);
+    const cardText = JSON.stringify(client.updates[0].card);
+    assert.match(cardText, /Codex task failed/);
+    assert.match(cardText, /智能等级：/);
+    assert.match(cardText, /快速模式：/);
     const commands = await listCommands(queuePath);
     const recoveredCommand = commands.find((item) => item.id === command.id);
     assert.equal(recoveredCommand?.state, "failed");

@@ -19,6 +19,9 @@ export interface CommandStatusCardOptions {
   signal?: NodeJS.Signals | null;
   timedOut?: boolean;
   gitBranch?: string;
+  model?: string;
+  reasoningEffort?: string;
+  fastModeEnabled?: boolean;
 }
 
 export function buildCommandStatusCard(
@@ -32,6 +35,7 @@ export function buildCommandStatusCard(
   const lines = [
     `任务状态：${phaseLabel(options.phase)}`,
     `指令摘要：${truncateSingleLine(command.text, 220)}`,
+    formatRuntimeConfigLine(command, config, options),
     command.claimedAt && options.phase === "in_progress"
       ? `已运行：${formatDuration(nowMs - Date.parse(command.claimedAt))}`
       : undefined,
@@ -141,6 +145,28 @@ function formatDuration(valueMs: number): string {
   if (minutes < 60) return `${minutes}m ${remainingSeconds}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
+}
+
+function formatRuntimeConfigLine(
+  command: AgentCommand,
+  config: BridgeConfig,
+  options: CommandStatusCardOptions
+): string {
+  return [
+    `当前模型：${options.model || command.model || config.codex.model || "Codex default"}`,
+    `智能等级：${formatReasoningEffort(options.reasoningEffort)}`,
+    `快速模式：${formatFastModeEnabled(options.fastModeEnabled)}`
+  ].join(" ｜ ");
+}
+
+function formatReasoningEffort(value: string | undefined): string {
+  return value || "(未配置)";
+}
+
+function formatFastModeEnabled(value: boolean | undefined): string {
+  if (value === true) return "已开启";
+  if (value === false) return "未开启";
+  return "(未知)";
 }
 
 function truncateSingleLine(value: string, maxLength: number): string {

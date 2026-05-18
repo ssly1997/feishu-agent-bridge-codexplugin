@@ -258,6 +258,8 @@ writeFileSync(outputPath, "全部完成");
     assert.match(cards, /最近进展/);
     assert.match(cards, /结论：\\n全部完成/);
     assert.doesNotMatch(cards, /进度摘要/);
+    assert.match(cards, /智能等级：/);
+    assert.match(cards, /快速模式：/);
     assert.match(cards, /Working directory/);
     assert.match(cards, /Git branch/);
     assert.match(cards, /feature\/progress-card/);

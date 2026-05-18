@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildBindProjectActionValue,
+  buildClearCodexModelActionValue,
   buildEnqueueAgentCommandActionValue,
   buildCodexFeatureDetailCard,
   buildCodexFeatureCard,
+  buildCodexModelCard,
   buildCodexMcpListCard,
   buildCodexHelpCard,
   buildCodexProjectListCard,
@@ -13,6 +15,7 @@ import {
   buildListSessionPageActionValue,
   buildRunCommandActionValue,
   buildSelectSessionActionValue,
+  buildSetCodexModelActionValue,
   parseCodexCardActionValue,
   parseSelectSessionActionValue
 } from "../src/sessionCard.js";
@@ -225,6 +228,14 @@ test("buildCodexHelpCard renders command shortcut buttons", () => {
     type: "run-command",
     command: "feature mcp"
   });
+  assert.deepEqual(parseCodexCardActionValue(buildSetCodexModelActionValue("gpt-5.4")), {
+    type: "set-model",
+    model: "gpt-5.4"
+  });
+  assert.deepEqual(parseCodexCardActionValue(buildClearCodexModelActionValue()), {
+    type: "clear-model"
+  });
+  assert.equal(parseCodexCardActionValue(buildSetCodexModelActionValue("bad model")), undefined);
   assert.deepEqual(parseCodexCardActionValue(buildEnqueueAgentCommandActionValue(
     "请 code review 最近一次提交，优先指出风险、回归和测试缺口。"
   )), {
@@ -303,7 +314,7 @@ test("buildCodexFeatureDetailCard renders feature detail and back button", () =>
   ]);
 });
 
-test("all non-MCP feature detail cards expose task buttons", () => {
+test("task-backed non-MCP feature detail cards expose task buttons", () => {
   for (const feature of [
     "personality",
     "review",
@@ -313,7 +324,6 @@ test("all non-MCP feature detail cards expose task buttons", () => {
     "pet",
     "fast",
     "reasoning",
-    "model",
     "fork"
   ]) {
     const card = buildCodexFeatureDetailCard(feature);
@@ -322,6 +332,38 @@ test("all non-MCP feature detail cards expose task buttons", () => {
     assert.match(text, /enqueue_agent_command/, feature);
     assert.ok(collectAgentCommands(card).length > 0, feature);
   }
+});
+
+test("buildCodexModelCard renders current model and switch buttons", () => {
+  const card = buildCodexModelCard({
+    projectLabel: "project repo",
+    sessionTitle: "当前会话",
+    sessionId: "session_123456789",
+    modelStatus: {
+      sessionModel: "gpt-5.4-mini",
+      bridgeModel: "gpt-5.5",
+      globalModel: "gpt-5.4",
+      effectiveModel: "gpt-5.4-mini",
+      reasoningEffort: "xhigh",
+      fastModeEnabled: true
+    }
+  });
+
+  const text = JSON.stringify(card);
+  assert.match(text, /Codex 功能：模型/);
+  assert.match(text, /Current model: gpt-5\.4-mini/);
+  assert.match(text, /智能等级: xhigh/);
+  assert.match(text, /快速模式: 已开启/);
+  assert.match(text, /Session override: gpt-5\.4-mini/);
+  assert.match(text, /Bridge default: gpt-5\.5/);
+  assert.match(text, /Global default: gpt-5\.4/);
+  assert.match(text, /set_codex_model/);
+  assert.match(text, /clear_codex_model/);
+  assert.match(text, /set_model_gpt-5_4-mini_gpt-5_4-mini/);
+  assert.match(text, /当前 GPT-5\.4 Mini/);
+  assert.match(text, /GPT-5\.4 Mini/);
+  assert.doesNotMatch(text, /返回功能面板/);
+  assert.deepEqual(collectRunCommands(card), []);
 });
 
 test("buildCodexMcpListCard renders MCP servers with colored state badges", () => {
