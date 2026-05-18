@@ -7,6 +7,7 @@ import { enqueueCommand, getCommandQueueStats, listCommands, resolveCommandQueue
 import { findCodexSession, findCodexProject, formatSelectedSessionWithSummary, listCodexProjects, listCodexSessions, parseCodexSessionControlCommand } from "./codexSessions.js";
 import { runCodexNewSession } from "./codexCli.js";
 import { FeishuClient } from "./feishuClient.js";
+import { formatGitBranchLine, formatGitBranchValueForCwd, readGitWorkingTreeStatus } from "./gitStatus.js";
 import { buildCodexHelpCard, buildCodexProjectListCard, buildCodexSessionListCard, parseCodexCardActionValue } from "./sessionCard.js";
 import { buildCommandStatusCard } from "./statusCard.js";
 import { readStandaloneListenerRuntimeStatus } from "./listenerRuntime.js";
@@ -278,13 +279,15 @@ export class FeishuCommandListener {
         const statusSummary = "任务已收到，正在等待 runtime 调度。";
         const statusUpdatedAt = new Date().toISOString();
         try {
+            const gitBranch = await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
             const result = await feishuClient.sendInteractiveMessageToReceiver(config, {
                 receiveIdType: "chat_id",
                 receiveId: command.chatId
             }, buildCommandStatusCard(command, config, {
                 phase: "queued",
                 progressSummary: statusSummary,
-                nowMs: Date.parse(statusUpdatedAt)
+                nowMs: Date.parse(statusUpdatedAt),
+                gitBranch
             }));
             const updated = await updateCommandStatusMetadata(command.id, queuePath, {
                 statusMessageId: result.messageId,
@@ -791,6 +794,7 @@ export class FeishuCommandListener {
     }
     async buildCurrentChatWorkStatusCard(config, queuePath, chatId, options) {
         const binding = await getChatSessionBinding(queuePath, chatId);
+        const gitStatus = await readGitWorkingTreeStatus(binding?.sessionCwd);
         const queue = await getCommandQueueStats(queuePath);
         const runtime = await readStandaloneListenerRuntimeStatus(this.options.configPath ?? CONFIG_PATH);
         const sessionStats = binding?.sessionId
@@ -811,6 +815,7 @@ export class FeishuCommandListener {
             queuePath,
             chatId,
             binding,
+            gitStatus,
             queue,
             runtime,
             sessionStats,
@@ -1077,7 +1082,7 @@ function formatStatusBindingSummary(context) {
             ? `session: ${truncateSingleLine(binding.sessionTitle || "(untitled)", 80)} (${shortId(binding.sessionId)})`
             : "session: 未绑定",
         binding?.sessionCwd ? `cwd: \`${truncateMiddle(binding.sessionCwd, 96)}\`` : undefined,
-        binding?.sessionGitBranch ? `branch: \`${truncateSingleLine(binding.sessionGitBranch, 48)}\`` : undefined
+        formatGitBranchLine(context.gitStatus)
     ].filter((line) => line !== undefined).join("\n");
 }
 function formatRunningTaskSummary(context) {

@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { readFile, stat } from "node:fs/promises";
 import { CONFIG_DIR, CONFIG_PATH, ConfigError, loadConfig } from "./config.js";
 import { buildNotificationCard } from "./card.js";
 import {
@@ -8,22 +9,31 @@ import {
   updateCommandStatusMetadata
 } from "./commandQueue.js";
 import { FeishuApiError, FeishuClient } from "./feishuClient.js";
-import { runCodexResume, type CodexProgressEvent, type CodexResumeResult } from "./codexCli.js";
 import {
+  progressSummaryFromJsonLine,
+  runCodexResume,
+  type CodexProgressEvent,
+  type CodexResumeResult
+} from "./codexCli.js";
+import {
+  findCodexSession,
   handleCodexSessionControlCommand,
   parseCodexSessionControlCommand,
   type CodexSessionControlCommand
 } from "./codexSessions.js";
+import { formatGitBranchValueForCwd } from "./gitStatus.js";
 import { buildCommandStatusCard, type CommandStatusPhase } from "./statusCard.js";
 import type { AgentCommand, BridgeConfig, NotifyStatus } from "./types.js";
 
-const PROGRESS_UPDATE_INTERVAL_MS = 60_000;
+const PROGRESS_UPDATE_INTERVAL_MS = 10_000;
+const INITIAL_CLI_HANDOFF_PROGRESS_SUMMARY = "已交接给 Codex CLI 处理。";
 
 export interface CodexCommandProcessorOptions {
   configPath?: string;
   feishuClient?: FeishuClient;
   now?: () => number;
   sessionId?: string;
+  progressUpdateIntervalMs?: number;
 }
 
 export interface CodexCommandProcessResult {
@@ -37,6 +47,10 @@ export interface CodexCommandProcessResult {
   summary?: string;
   notification?: "sent" | "updated" | "skipped";
   notifyError?: string;
+}
+
+interface CodexSessionProgressReader {
+  readNewSummaries: () => Promise<string[]>;
 }
 
 export async function processNextCodexCommand(
@@ -131,59 +145,119 @@ export async function processNextCodexCommand(
     };
   }
 
+  const progressUpdateIntervalMs = options.progressUpdateIntervalMs ?? PROGRESS_UPDATE_INTERVAL_MS;
+  const initialProgressNowMs = options.now?.() ?? Date.now();
+  const initialProgressSummary = formatRunningProgressSummary([INITIAL_CLI_HANDOFF_PROGRESS_SUMMARY]);
+  const commandCodexConfig = codexConfigForCommand(config, command);
+  const sessionProgressReader = await createCodexSessionProgressReader(
+    commandCodexConfig,
+    command.sessionId
+  );
+
   command = await updateCommandStatusCard(
     config,
     queuePath,
     command,
     "in_progress",
-    "Codex CLI 已开始处理这条飞书指令。",
+    initialProgressSummary,
     feishuClient,
-    { nowMs: options.now?.() ?? Date.now() }
+    { nowMs: initialProgressNowMs }
   ).then((result) => result.command);
 
   const progressUpdates: Promise<void>[] = [];
-  let lastProgressSummary = "";
-  let lastProgressSentAt: number | undefined;
+  const publicProgressSummaries: string[] = [INITIAL_CLI_HANDOFF_PROGRESS_SUMMARY];
+  let lastCardSummary = initialProgressSummary;
+  let lastCardUpdatedAt = initialProgressNowMs;
+  let progressUpdateChain: Promise<void> = Promise.resolve();
+  let progressRefreshChain: Promise<void> = Promise.resolve();
+  let progressHeartbeat: NodeJS.Timeout | undefined;
+  const recordProgressSummary = (summary: string) => {
+    const normalized = summary.replace(/\s+/g, " ").trim();
+    if (!normalized || publicProgressSummaries[publicProgressSummaries.length - 1] === normalized) return;
+    publicProgressSummaries.push(normalized);
+    if (publicProgressSummaries.length > 4) {
+      publicProgressSummaries.splice(0, publicProgressSummaries.length - 4);
+    }
+  };
+  const enqueueProgressUpdate = (
+    nowMs: number,
+    updateOptions: { allowSameSummary?: boolean } = {}
+  ) => {
+    const statusSummary = formatRunningProgressSummary(publicProgressSummaries);
+    if (!updateOptions.allowSameSummary && statusSummary === lastCardSummary) return;
+    if (nowMs - lastCardUpdatedAt < progressUpdateIntervalMs) return;
+
+    lastCardSummary = statusSummary;
+    lastCardUpdatedAt = nowMs;
+    const update = progressUpdateChain
+      .catch(() => undefined)
+      .then(async () => {
+        const result = await updateCommandStatusCard(
+          config,
+          queuePath,
+          command,
+          "in_progress",
+          statusSummary,
+          feishuClient,
+          { nowMs }
+        );
+        command = result.command;
+      })
+      .catch(() => {
+        // Progress card updates should never interrupt the running Codex task.
+      });
+    progressUpdateChain = update;
+    progressUpdates.push(update);
+  };
   const reportProgress = (event: CodexProgressEvent) => {
     const progressSummary = event.summary.trim();
-    if (!progressSummary || progressSummary === lastProgressSummary) return;
-    if (
-      lastProgressSentAt !== undefined &&
-      event.receivedAtMs - lastProgressSentAt < PROGRESS_UPDATE_INTERVAL_MS
-    ) {
-      return;
-    }
-    lastProgressSummary = progressSummary;
-    lastProgressSentAt = event.receivedAtMs;
-    progressUpdates.push(
-      updateCommandStatusCard(
-        config,
-        queuePath,
-        command,
-        "in_progress",
-        progressSummary,
-        feishuClient,
-        { nowMs: event.receivedAtMs }
-      ).then((result) => {
-        command = result.command;
-      }).catch(() => {
-        // Progress card updates should never interrupt the running Codex task.
+    if (!progressSummary) return;
+    recordProgressSummary(progressSummary);
+    enqueueProgressUpdate(event.receivedAtMs);
+  };
+  const refreshProgressFromSessionLog = (nowMs: number) => {
+    progressRefreshChain = progressRefreshChain
+      .catch(() => undefined)
+      .then(async () => {
+        const summaries = await sessionProgressReader?.readNewSummaries();
+        for (const summary of summaries ?? []) {
+          recordProgressSummary(summary);
+        }
+        enqueueProgressUpdate(nowMs, { allowSameSummary: true });
       })
-    );
+      .catch(() => {
+        // Session-log progress is best-effort and must not interrupt the task.
+      });
+  };
+  const stopProgressUpdates = async () => {
+    if (progressHeartbeat) {
+      clearInterval(progressHeartbeat);
+      progressHeartbeat = undefined;
+    }
+    await progressRefreshChain.catch(() => undefined);
+    await Promise.allSettled(progressUpdates);
+    await progressUpdateChain.catch(() => undefined);
   };
 
+  if (command.statusMessageId && config.enabled) {
+    progressHeartbeat = setInterval(() => {
+      refreshProgressFromSessionLog(options.now?.() ?? Date.now());
+    }, progressUpdateIntervalMs);
+    progressHeartbeat.unref?.();
+  }
+
   try {
-    codex = await runCodexResume(buildFeishuCommandPrompt(command), codexConfigForCommand(config, command), {
+    codex = await runCodexResume(buildFeishuCommandPrompt(command), commandCodexConfig, {
       outputPath: codexOutputPath(config, command),
       now: options.now,
       onProgress: reportProgress
     });
-    await Promise.allSettled(progressUpdates);
     ackState = codex.ok ? "done" : "failed";
     summary = summarizeCodexResult(codex);
   } catch (error) {
-    await Promise.allSettled(progressUpdates);
     summary = formatError(error);
+  } finally {
+    await stopProgressUpdates();
   }
 
   const updatedCommand = await ackCommand(command.id, ackState, queuePath, summary);
@@ -322,6 +396,7 @@ async function updateCommandStatusCard(
   }
 
   try {
+    const gitBranch = await formatCommandGitBranch(config, command);
     await feishuClient.updateInteractiveMessage(
       config,
       command.statusMessageId,
@@ -334,7 +409,8 @@ async function updateCommandStatusCard(
         durationMs: options.codex?.durationMs,
         exitCode: options.codex?.exitCode,
         signal: options.codex?.signal,
-        timedOut: options.codex?.timedOut
+        timedOut: options.codex?.timedOut,
+        gitBranch
       })
     );
     const updated = await updateCommandStatusMetadata(command.id, queuePath, {
@@ -372,6 +448,7 @@ async function notifyCommandResult(
   }
 
   const status: NotifyStatus = ackState === "done" ? "success" : "failed";
+  const gitBranch = await formatCommandGitBranch(config, command);
   const card = buildNotificationCard(
     {
       source: "codex-cli",
@@ -379,6 +456,7 @@ async function notifyCommandResult(
       status,
       summary,
       cwd: command.sessionCwd ?? config.codex.cwd,
+      gitBranch,
       projectLabel: command.projectDisplayLabel,
       codexSessionId: command.sessionId,
       codexSessionTitle: command.sessionTitle,
@@ -411,6 +489,10 @@ async function notifyCommandResult(
   }
 }
 
+function formatCommandGitBranch(config: BridgeConfig, command: AgentCommand): Promise<string> {
+  return formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
+}
+
 function summarizeCodexResult(result: CodexResumeResult): string {
   const body = result.lastMessage.trim() || result.stdout.trim() || result.stderr.trim();
   if (result.ok) {
@@ -420,6 +502,56 @@ function summarizeCodexResult(result: CodexResumeResult): string {
     ? `Codex CLI timed out after ${result.durationMs}ms.`
     : `Codex CLI exited with code ${result.exitCode ?? "null"}${result.signal ? ` signal=${result.signal}` : ""}.`;
   return body ? `${reason}\n\n${body}` : reason;
+}
+
+async function createCodexSessionProgressReader(
+  config: BridgeConfig["codex"],
+  sessionId: string | undefined
+): Promise<CodexSessionProgressReader | undefined> {
+  if (!sessionId) return undefined;
+  let rolloutPath: string | undefined;
+  try {
+    const session = await findCodexSession(config, sessionId, { includeTemporary: true });
+    rolloutPath = session?.rolloutPath;
+  } catch {
+    return undefined;
+  }
+  if (!rolloutPath) return undefined;
+
+  let offset = await fileSize(rolloutPath);
+  let buffered = "";
+  return {
+    readNewSummaries: async () => {
+      const data = await readFile(rolloutPath);
+      if (offset > data.byteLength) {
+        offset = 0;
+        buffered = "";
+      }
+      const chunk = data.subarray(offset).toString("utf8");
+      offset = data.byteLength;
+      const lines = `${buffered}${chunk}`.split(/\r?\n/);
+      buffered = lines.pop() ?? "";
+      return lines
+        .map((line) => progressSummaryFromJsonLine(line))
+        .filter((summary): summary is string => Boolean(summary));
+    }
+  };
+}
+
+async function fileSize(path: string): Promise<number> {
+  try {
+    return (await stat(path)).size;
+  } catch {
+    return 0;
+  }
+}
+
+function formatRunningProgressSummary(publicProgressSummaries: string[]): string {
+  if (publicProgressSummaries.length === 0) return "";
+  return [
+    "最近进展：",
+    ...publicProgressSummaries.map((item) => `- ${item}`)
+  ].join("\n");
 }
 
 function safeFilename(value: string): string {

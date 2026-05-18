@@ -38,6 +38,12 @@ import { runCodexNewSession } from "./codexCli.js";
 import type { CodexResumeResult } from "./codexCli.js";
 import { FeishuClient } from "./feishuClient.js";
 import {
+  formatGitBranchLine,
+  formatGitBranchValueForCwd,
+  readGitWorkingTreeStatus,
+  type GitWorkingTreeStatus
+} from "./gitStatus.js";
+import {
   buildCodexHelpCard,
   buildCodexProjectListCard,
   buildCodexSessionListCard,
@@ -109,6 +115,7 @@ interface WorkStatusContext {
   queuePath: string;
   chatId: string;
   binding?: ChatSessionBinding;
+  gitStatus: GitWorkingTreeStatus;
   queue: CommandQueueStats;
   runtime?: RuntimeStatusSnapshot;
   sessionStats?: SessionCommandStats;
@@ -464,6 +471,7 @@ export class FeishuCommandListener {
     const statusSummary = "任务已收到，正在等待 runtime 调度。";
     const statusUpdatedAt = new Date().toISOString();
     try {
+      const gitBranch = await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
       const result = await feishuClient.sendInteractiveMessageToReceiver(
         config,
         {
@@ -473,7 +481,8 @@ export class FeishuCommandListener {
         buildCommandStatusCard(command, config, {
           phase: "queued",
           progressSummary: statusSummary,
-          nowMs: Date.parse(statusUpdatedAt)
+          nowMs: Date.parse(statusUpdatedAt),
+          gitBranch
         })
       );
       const updated = await updateCommandStatusMetadata(command.id, queuePath, {
@@ -1271,6 +1280,7 @@ export class FeishuCommandListener {
     options: { full: boolean }
   ): Promise<Record<string, unknown>> {
     const binding = await getChatSessionBinding(queuePath, chatId);
+    const gitStatus = await readGitWorkingTreeStatus(binding?.sessionCwd);
     const queue = await getCommandQueueStats(queuePath);
     const runtime = await readStandaloneListenerRuntimeStatus(this.options.configPath ?? CONFIG_PATH);
     const sessionStats = binding?.sessionId
@@ -1291,6 +1301,7 @@ export class FeishuCommandListener {
       queuePath,
       chatId,
       binding,
+      gitStatus,
       queue,
       runtime,
       sessionStats,
@@ -1677,7 +1688,7 @@ function formatStatusBindingSummary(context: WorkStatusContext): string {
       ? `session: ${truncateSingleLine(binding.sessionTitle || "(untitled)", 80)} (${shortId(binding.sessionId)})`
       : "session: 未绑定",
     binding?.sessionCwd ? `cwd: \`${truncateMiddle(binding.sessionCwd, 96)}\`` : undefined,
-    binding?.sessionGitBranch ? `branch: \`${truncateSingleLine(binding.sessionGitBranch, 48)}\`` : undefined
+    formatGitBranchLine(context.gitStatus)
   ].filter((line): line is string => line !== undefined).join("\n");
 }
 

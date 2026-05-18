@@ -16,8 +16,11 @@ export function buildNotificationCard(input, config, options = {}) {
     ].join("\n")));
     elements.push({ tag: "hr" });
     elements.push(sectionBlock("Summary", truncate(input.summary, MAX_SUMMARY_LENGTH)));
-    if (effectiveCwd) {
-        elements.push(sectionBlock("Working directory", escapeMarkdownValue(effectiveCwd)));
+    if (effectiveCwd || input.gitBranch) {
+        elements.push(sectionBlock("Working directory", effectiveCwd ? escapeMarkdownValue(effectiveCwd) : "（未配置）"));
+    }
+    if (input.gitBranch) {
+        elements.push(sectionBlock("Git branch", truncate(input.gitBranch, MAX_ITEM_LENGTH)));
     }
     appendStringList(elements, "Artifacts", input.artifacts);
     appendLinks(elements, input.links);
@@ -43,6 +46,7 @@ export function buildNotificationCard(input, config, options = {}) {
 export function normalizeStatus(status) {
     if (status === "success" ||
         status === "failed" ||
+        status === "in_progress" ||
         status === "needs_action" ||
         status === "info") {
         return status;
@@ -87,6 +91,8 @@ function statusLabel(status) {
             return "Success";
         case "failed":
             return "Failed";
+        case "in_progress":
+            return "In progress";
         case "needs_action":
             return "Needs action";
         case "info":
@@ -99,6 +105,8 @@ function statusTemplate(status) {
             return "green";
         case "failed":
             return "red";
+        case "in_progress":
+            return "blue";
         case "needs_action":
             return "orange";
         case "info":

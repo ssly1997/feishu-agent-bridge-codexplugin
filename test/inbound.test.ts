@@ -448,6 +448,92 @@ test("listener status card says when there is no running task", async () => {
   }
 });
 
+test("listener status card reports live git branch and invalid git cwd", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-status-git-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const repoPath = join(dir, "repo");
+  const nonRepoPath = join(dir, "not-git");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    await mkdir(repoPath);
+    await mkdir(nonRepoPath);
+    await execFileAsync("git", ["init"], { cwd: repoPath });
+    await execFileAsync("git", ["checkout", "-b", "feature/status-card"], { cwd: repoPath });
+
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+    await upsertChatSessionBinding(queuePath, {
+      chatId: "oc_test",
+      chatType: "group",
+      chatName: "当前群",
+      session: {
+        id: "session_git",
+        title: "Git Session",
+        cwd: repoPath,
+        source: "vscode",
+        updatedAt: 2000,
+        createdAt: 1000,
+        gitBranch: "stale-branch"
+      }
+    });
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      messageId: "om_status_git",
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> status"
+      }),
+      mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
+    }), config, client);
+
+    assert.equal(client.cards.length, 1);
+    const gitCardText = JSON.stringify(client.cards[0].card);
+    assert.match(gitCardText, /Git branch: feature\/status-card/);
+    assert.doesNotMatch(gitCardText, /有效仓库/);
+    assert.doesNotMatch(gitCardText, /stale-branch/);
+
+    await upsertChatSessionBinding(queuePath, {
+      chatId: "oc_test",
+      chatType: "group",
+      chatName: "当前群",
+      session: {
+        id: "session_non_git",
+        title: "Non Git Session",
+        cwd: nonRepoPath,
+        source: "vscode",
+        updatedAt: 3000,
+        createdAt: 1000
+      }
+    });
+    await invokeMessageReceive(listener, makeMessageEvent({
+      messageId: "om_status_non_git",
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> status"
+      }),
+      mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
+    }), config, client);
+
+    assert.equal(client.cards.length, 2);
+    assert.match(JSON.stringify(client.cards[1].card), /Git branch: 非有效 git 仓库/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("listener deduplicates control commands by message id", async () => {
   const dir = await mkdtemp(join(tmpdir(), "fab-inbound-dedupe-"));
   const queuePath = join(dir, "commands.json");

@@ -178,6 +178,7 @@ const outputPath = args[args.indexOf("-o") + 1];
 readFileSync(0, "utf8");
 console.log(JSON.stringify({ type: "response_item", payload: { type: "reasoning", summary: "internal" } }));
 console.log(JSON.stringify({ type: "response_item", payload: { type: "function_call", name: "exec_command", arguments: "{\\\\\\"cmd\\\\\\":\\\\\\"secret\\\\\\"}" } }));
+console.log(JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: "正在检查 diff" }] } }));
 console.log(JSON.stringify({ type: "event_msg", payload: { type: "agent_message", phase: "commentary", message: "正在跑测试" } }));
 writeFileSync(outputPath, "done");
 `,
@@ -197,7 +198,7 @@ writeFileSync(outputPath, "done");
     });
 
     assert.equal(result.ok, true);
-    assert.deepEqual(progress, ["正在调用工具：exec_command", "进展：正在跑测试"]);
+    assert.deepEqual(progress, ["正在执行本地命令", "进展：正在检查 diff", "进展：正在跑测试"]);
     assert.doesNotMatch(progress.join("\n"), /secret|internal/);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -207,7 +208,40 @@ writeFileSync(outputPath, "done");
 test("progressSummaryFromJsonLine ignores non-public Codex events", () => {
   assert.equal(
     progressSummaryFromJsonLine(JSON.stringify({ type: "function_call", name: "exec_command" })),
-    "正在调用工具：exec_command"
+    "正在执行本地命令"
+  );
+  assert.equal(
+    progressSummaryFromJsonLine(JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        arguments: JSON.stringify({ cmd: "corepack pnpm test" })
+      }
+    })),
+    "正在运行测试：pnpm test"
+  );
+  assert.equal(
+    progressSummaryFromJsonLine(JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        output: "Process exited with code 0\\n# tests 104\\n# pass 104\\n# fail 0"
+      }
+    })),
+    "工具结果：测试通过（104 passed）"
+  );
+  assert.equal(
+    progressSummaryFromJsonLine(JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        phase: "commentary",
+        content: [{ type: "output_text", text: "继续检查" }]
+      }
+    })),
+    "进展：继续检查"
   );
   assert.equal(
     progressSummaryFromJsonLine(JSON.stringify({

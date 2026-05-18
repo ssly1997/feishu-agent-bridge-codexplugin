@@ -2,6 +2,7 @@ import { getPendingSessionIds, recoverInProgressCommandRecords, resolveCommandQu
 import { CONFIG_PATH, loadConfig } from "./config.js";
 import { FeishuClient } from "./feishuClient.js";
 import { processNextCodexCommand } from "./codexWorker.js";
+import { formatGitBranchValueForCwd } from "./gitStatus.js";
 import { buildCommandStatusCard } from "./statusCard.js";
 export class CodexRuntimeScheduler {
     options;
@@ -128,11 +129,13 @@ export class CodexRuntimeScheduler {
         }
         try {
             const phase = command.state === "failed" ? "failed" : "queued";
+            const gitBranch = await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
             await (this.options.feishuClient ?? new FeishuClient()).updateInteractiveMessage(config, command.statusMessageId, buildCommandStatusCard(command, config, {
                 phase,
                 nowMs: Date.parse(statusUpdatedAt),
                 progressSummary: phase === "queued" ? summary : undefined,
-                resultSummary: phase === "failed" ? summary : undefined
+                resultSummary: phase === "failed" ? summary : undefined,
+                gitBranch
             }));
             await updateCommandStatusMetadata(command.id, queuePath, {
                 statusUpdatedAt,

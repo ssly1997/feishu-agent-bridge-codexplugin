@@ -11,6 +11,7 @@ test("buildNotificationCard creates a Feishu interactive card payload", () => {
       status: "success",
       summary: "All checks passed.\n\n```bash\ncorepack pnpm test\n```",
       cwd: "/tmp/project",
+      gitBranch: "main",
       codexSessionId: "019e249d-96bd-75d3-b604-16a0198a4649",
       codexSessionTitle: "Build investigation",
       artifacts: ["/tmp/project/report.txt"],
@@ -40,6 +41,9 @@ test("buildNotificationCard creates a Feishu interactive card payload", () => {
   assert.match(JSON.stringify(card), /All checks passed/);
   assert.match(JSON.stringify(card), /https:\/\/example.com\/run\/1/);
   assert.match(JSON.stringify(card), /Working directory/);
+  assert.match(JSON.stringify(card), /Git branch/);
+  assert.match(JSON.stringify(card), /main/);
+  assert.doesNotMatch(JSON.stringify(card), /有效仓库/);
   assert.match(JSON.stringify(card), /Next steps/);
   assert.match(JSON.stringify(card), /1\. Ship it/);
   assert.doesNotMatch(JSON.stringify(card), /Metadata/);
@@ -101,8 +105,25 @@ test("buildNotificationCard can avoid configured Codex session for manual notifi
 
 test("normalizeStatus falls back to info for unknown values", () => {
   assert.equal(normalizeStatus("failed"), "failed");
+  assert.equal(normalizeStatus("in_progress"), "in_progress");
   assert.equal(normalizeStatus("unknown"), "info");
   assert.equal(normalizeStatus(undefined), "info");
+});
+
+test("buildNotificationCard renders in-progress status without action wording", () => {
+  const card = buildNotificationCard(
+    {
+      title: "Codex task in progress",
+      status: "in_progress",
+      summary: "任务仍在执行。"
+    },
+    DEFAULT_CONFIG
+  );
+
+  const text = JSON.stringify(card);
+  assert.equal(card.header.template, "blue");
+  assert.match(text, /In progress/);
+  assert.doesNotMatch(text, /Needs action/);
 });
 
 test("buildNotificationCard truncates long summaries", () => {

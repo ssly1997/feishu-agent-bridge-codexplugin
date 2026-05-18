@@ -2,7 +2,7 @@ export type ReceiveIdType = "chat_id" | "open_id" | "email";
 
 export type MessageStyle = "card";
 
-export type NotifyStatus = "info" | "success" | "failed" | "needs_action";
+export type NotifyStatus = "info" | "in_progress" | "success" | "failed" | "needs_action";
 
 export type InboundMode = "long_connection";
 
@@ -79,6 +79,7 @@ export interface NotifyInput {
   status?: NotifyStatus | string;
   summary: string;
   cwd?: string;
+  gitBranch?: string;
   projectLabel?: string;
   codexSessionId?: string;
   codexSessionTitle?: string;

@@ -173,6 +173,9 @@ test("processNextCodexCommand updates an existing status card while running and 
   const client = new FakeFeishuClient();
   let now = Date.parse("2026-05-15T00:00:00.000Z");
   try {
+    await execFileAsync("git", ["init"], { cwd: dir });
+    await execFileAsync("git", ["checkout", "-b", "feature/progress-card"], { cwd: dir });
+
     await writeFile(
       scriptPath,
       `#!/usr/bin/env node
@@ -249,10 +252,214 @@ writeFileSync(outputPath, "全部完成");
     assert.ok(client.updated.every((item) => item.messageId === "om_status_card"));
     const cards = client.updated.map((item) => JSON.stringify(item.card)).join("\n");
     assert.match(cards, /处理中/);
-    assert.match(cards, /正在调用工具：exec_command/);
+    assert.match(cards, /正在执行本地命令/);
     assert.match(cards, /测试已经通过一半/);
     assert.match(cards, /完成/);
+    assert.match(cards, /最近进展/);
+    assert.match(cards, /结论：全部完成/);
+    assert.doesNotMatch(cards, /进度摘要/);
+    assert.match(cards, /Working directory/);
+    assert.match(cards, /Git branch/);
+    assert.match(cards, /feature\/progress-card/);
+    assert.doesNotMatch(cards, /有效仓库/);
     assert.doesNotMatch(cards, /secret/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("processNextCodexCommand keeps in-progress status card alive without agent output", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-status-heartbeat-"));
+  const scriptPath = join(dir, "fake-codex.mjs");
+  const configPath = join(dir, "config.json");
+  const queuePath = join(dir, "commands.db");
+  const client = new FakeFeishuClient();
+  try {
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const outputPath = args[args.indexOf("-o") + 1];
+readFileSync(0, "utf8");
+await new Promise((resolve) => setTimeout(resolve, 90));
+writeFileSync(outputPath, "长任务完成");
+`,
+      "utf8"
+    );
+    await chmod(scriptPath, 0o755);
+
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        ...DEFAULT_CONFIG,
+        appId: "cli_test",
+        appSecret: "secret_test",
+        receiveId: "oc_test",
+        enabled: true,
+        inbound: {
+          ...DEFAULT_CONFIG.inbound,
+          enabled: true,
+          queueDbPath: queuePath
+        },
+        codex: {
+          ...DEFAULT_CONFIG.codex,
+          enabled: true,
+          command: scriptPath,
+          sessionId: "session_1",
+          timeoutMs: 5000
+        }
+      }),
+      "utf8"
+    );
+
+    const { command } = await enqueueCommand(
+      {
+        text: "执行一个长任务",
+        rawText: "执行一个长任务",
+        messageId: "om_heartbeat",
+        chatId: "oc_1",
+        chatType: "group",
+        sender: { openId: "ou_user" },
+        createdAt: "1710000000000",
+        sessionId: "session_1",
+        sessionTitle: "Session 1"
+      },
+      queuePath
+    );
+    await updateCommandStatusMetadata(command.id, queuePath, {
+      statusMessageId: "om_status_card"
+    });
+
+    const result = await processNextCodexCommand({
+      configPath,
+      feishuClient: client,
+      progressUpdateIntervalMs: 20
+    });
+
+    assert.equal(result.ackState, "done");
+    const cards = client.updated.map((item) => JSON.stringify(item.card));
+    const inProgressCards = cards.filter((card) => /处理中/.test(card));
+    assert.ok(inProgressCards.length >= 2);
+    assert.doesNotMatch(cards.join("\n"), /状态卡每 20ms 自动刷新/);
+    assert.doesNotMatch(cards.join("\n"), /Codex CLI 已开始处理/);
+    assert.match(inProgressCards.join("\n"), /最近进展/);
+    assert.match(inProgressCards.join("\n"), /已交接给 Codex CLI 处理/);
+    assert.match(inProgressCards.join("\n"), /In progress/);
+    assert.doesNotMatch(inProgressCards.join("\n"), /Needs action/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("processNextCodexCommand reads public progress from Codex session log", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-codex-worker-status-session-log-"));
+  const scriptPath = join(dir, "fake-codex.mjs");
+  const configPath = join(dir, "config.json");
+  const queuePath = join(dir, "commands.db");
+  const dbPath = join(dir, "state.sqlite");
+  const rolloutPath = join(dir, "rollout.jsonl");
+  const client = new FakeFeishuClient();
+  try {
+    await writeFile(rolloutPath, "", "utf8");
+    await execFileAsync("sqlite3", [
+      dbPath,
+      `
+create table threads (
+  id text primary key,
+  title text not null,
+  cwd text not null,
+  source text not null,
+  updated_at integer not null,
+  created_at integer not null,
+  archived integer not null,
+  model text,
+  git_branch text,
+  rollout_path text,
+  first_user_message text
+);
+insert into threads values ('session_1', 'Session 1', '${dir}', 'cli', 2000, 1000, 0, 'gpt-5', null, '${rolloutPath}', '测试');
+`
+    ]);
+    await writeFile(
+      scriptPath,
+      `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+const rolloutPath = ${JSON.stringify(rolloutPath)};
+const args = process.argv.slice(2);
+const outputPath = args[args.indexOf("-o") + 1];
+readFileSync(0, "utf8");
+await new Promise((resolve) => setTimeout(resolve, 35));
+appendFileSync(rolloutPath, JSON.stringify({
+  type: "response_item",
+  payload: {
+    type: "message",
+    role: "assistant",
+    phase: "commentary",
+    content: [{ type: "output_text", text: "正在读取 session 日志里的公开进展" }]
+  }
+}) + "\\n");
+await new Promise((resolve) => setTimeout(resolve, 65));
+writeFileSync(outputPath, "长任务完成");
+`,
+      "utf8"
+    );
+    await chmod(scriptPath, 0o755);
+
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        ...DEFAULT_CONFIG,
+        appId: "cli_test",
+        appSecret: "secret_test",
+        receiveId: "oc_test",
+        enabled: true,
+        inbound: {
+          ...DEFAULT_CONFIG.inbound,
+          enabled: true,
+          queueDbPath: queuePath
+        },
+        codex: {
+          ...DEFAULT_CONFIG.codex,
+          enabled: true,
+          command: scriptPath,
+          sessionId: "session_1",
+          stateDbPath: dbPath,
+          timeoutMs: 5000
+        }
+      }),
+      "utf8"
+    );
+
+    const { command } = await enqueueCommand(
+      {
+        text: "执行一个会写 session 日志的长任务",
+        rawText: "执行一个会写 session 日志的长任务",
+        messageId: "om_session_log",
+        chatId: "oc_1",
+        chatType: "group",
+        sender: { openId: "ou_user" },
+        createdAt: "1710000000000",
+        sessionId: "session_1",
+        sessionTitle: "Session 1"
+      },
+      queuePath
+    );
+    await updateCommandStatusMetadata(command.id, queuePath, {
+      statusMessageId: "om_status_card"
+    });
+
+    const result = await processNextCodexCommand({
+      configPath,
+      feishuClient: client,
+      progressUpdateIntervalMs: 20
+    });
+
+    assert.equal(result.ackState, "done");
+    const cards = client.updated.map((item) => JSON.stringify(item.card)).join("\n");
+    assert.match(cards, /最近进展/);
+    assert.match(cards, /正在读取 session 日志里的公开进展/);
+    assert.doesNotMatch(cards, /状态卡每/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

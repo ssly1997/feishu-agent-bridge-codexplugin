@@ -14,6 +14,7 @@ export interface CommandStatusCardOptions {
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
   timedOut?: boolean;
+  gitBranch?: string;
 }
 
 export function buildCommandStatusCard(
@@ -23,6 +24,7 @@ export function buildCommandStatusCard(
 ) {
   const nowMs = options.nowMs ?? Date.now();
   const statusSummary = options.resultSummary ?? options.progressSummary ?? command.statusSummary;
+  const statusSummaryLines = formatStatusSummaryLines(options.phase, statusSummary);
   const lines = [
     `任务状态：${phaseLabel(options.phase)}`,
     `Command ID：${command.id}`,
@@ -41,7 +43,7 @@ export function buildCommandStatusCard(
     command.attachments?.length
       ? `附件：${command.attachments.length} 个（${command.attachments.map((item) => basename(item.path)).join(", ")}）`
       : undefined,
-    statusSummary ? `进度摘要：${truncateMultiline(statusSummary, 900)}` : undefined
+    ...statusSummaryLines
   ].filter((line): line is string => Boolean(line));
 
   return buildNotificationCard(
@@ -51,6 +53,7 @@ export function buildCommandStatusCard(
       status: phaseStatus(options.phase),
       summary: lines.join("\n"),
       cwd: command.sessionCwd ?? config.codex.cwd,
+      gitBranch: options.gitBranch,
       projectLabel: command.projectDisplayLabel,
       codexSessionId: command.sessionId,
       codexSessionTitle: command.sessionTitle,
@@ -91,7 +94,7 @@ function phaseStatus(phase: CommandStatusPhase): NotifyStatus {
     case "queued":
       return "info";
     case "in_progress":
-      return "needs_action";
+      return "in_progress";
     case "done":
       return "success";
     case "failed":
@@ -103,6 +106,28 @@ function formatDate(value: string): string {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return value;
   return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatStatusSummaryLines(phase: CommandStatusPhase, statusSummary: string | undefined): string[] {
+  if (!statusSummary) return [];
+  switch (phase) {
+    case "in_progress":
+      return [truncateMultiline(statusSummary, 900)];
+    case "failed":
+      return [`失败原因：${truncateMultiline(statusSummary, 900)}`];
+    case "queued":
+      return [`说明：${truncateMultiline(statusSummary, 900)}`];
+    case "done":
+      return [`结论：${formatConclusion(statusSummary)}`];
+  }
+}
+
+function formatConclusion(value: string): string {
+  const firstUsefulLine = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith("```"));
+  return truncateSingleLine(firstUsefulLine ?? value, 260);
 }
 
 function formatDuration(valueMs: number): string {
