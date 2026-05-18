@@ -178,6 +178,8 @@ test("buildCodexHelpCard renders command shortcut buttons", () => {
 
   const text = JSON.stringify(card);
   assert.match(text, /current-project/);
+  assert.match(text, /status/);
+  assert.match(text, /status-full/);
   assert.match(text, /unbind-project/);
   assert.match(text, /unbind-session/);
   assert.match(text, /解绑说明/);
@@ -186,6 +188,8 @@ test("buildCodexHelpCard renders command shortcut buttons", () => {
   assert.match(text, /run_codex_command/);
   assert.deepEqual(collectRunCommands(card), [
     "help",
+    "status",
+    "status-full",
     "list-project",
     "current-project",
     "new-session",
@@ -199,6 +203,14 @@ test("buildCodexHelpCard renders command shortcut buttons", () => {
   assert.deepEqual(parseCodexCardActionValue(buildRunCommandActionValue("current-project")), {
     type: "run-command",
     command: "current-project"
+  });
+  assert.deepEqual(parseCodexCardActionValue(buildRunCommandActionValue("status")), {
+    type: "run-command",
+    command: "status"
+  });
+  assert.deepEqual(parseCodexCardActionValue(buildRunCommandActionValue("status-full")), {
+    type: "run-command",
+    command: "status-full"
   });
   assert.deepEqual(parseCodexCardActionValue(buildRunCommandActionValue("unbind-project")), {
     type: "run-command",

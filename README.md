@@ -353,6 +353,8 @@ corepack pnpm runtime
 
 ```text
 @机器人 help
+@机器人 status
+@机器人 status-full
 @机器人 list-project
 @机器人 list-project 2
 @机器人 current-project
@@ -377,6 +379,8 @@ corepack pnpm runtime
 - `list-session` 默认只展示当前 project 下的 session。
 - `list-session --all` 展示全局 session。
 - `list-session --temp` 展示 temporary session。
+- `status` 用精简卡片展示当前群 active session、正在执行的任务、队列摘要和 runtime 摘要。
+- `status-full` 用完整卡片展示 runtime、队列路径、配置和最近任务明细。
 - `switch-session` 只能切换当前 project 内的 session。跨 project 需要先 `switch-project`。
 - `new-session` 会在当前 project root 下启动新的 `codex exec`，等待本地 state DB 落盘后绑定为 active session。
 - `unbind-session` 只解除当前 active session，保留当前 project 绑定；后续可以继续 `list-session` / `new-session`。
@@ -485,6 +489,7 @@ sqlite3 ~/.feishu-agent-bridge/commands.db 'select id,state,session_id,text from
 ```text
 @机器人 list-project
 @机器人 bind-project 1
+@机器人 status
 @机器人 current-session
 @机器人 继续执行测试
 ```

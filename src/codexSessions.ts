@@ -57,6 +57,7 @@ export interface CodexProject {
 
 export type CodexSessionControlCommand =
   | { type: "help" }
+  | { type: "status"; full: boolean }
   | { type: "current-project" }
   | { type: "current-session" }
   | { type: "list-project"; page: number }
@@ -97,7 +98,15 @@ export function parseCodexSessionControlCommand(
     return { type: "help" };
   }
 
-  if (/^(?:current-session|session-status|session-current)$/i.test(trimmed)) {
+  if (/^(?:status-full|full-status|work-status-full|task-status-full|完整状态|状态详情|任务状态详情)$/i.test(trimmed)) {
+    return { type: "status", full: true };
+  }
+
+  if (/^(?:status|work-status|task-status|current-status|session-status|状态|工作状态|任务状态|当前状态)$/i.test(trimmed)) {
+    return { type: "status", full: false };
+  }
+
+  if (/^(?:current-session|session-current)$/i.test(trimmed)) {
     return { type: "current-session" };
   }
 
@@ -182,6 +191,15 @@ export async function handleCodexSessionControlCommand(
         control: "current-session",
         title: "Current Codex session",
         summary: await formatCurrentSession(config.codex)
+      };
+    }
+
+    if (control.type === "status") {
+      return {
+        ackState: "failed",
+        control: "status",
+        title: "Current work status requires chat context",
+        summary: "status 需要当前飞书群上下文，请在群里发送该命令，由 listener 直接处理。"
       };
     }
 
@@ -896,6 +914,8 @@ function formatGlobalHelp(): string {
     "可用指令：",
     "",
     "help / 帮助：查看帮助。",
+    "status：用精简卡片查看当前工作状态。",
+    "status-full：用完整卡片查看 runtime 和任务队列明细。",
     "list-project [页码]：列出可绑定 project。",
     "current-project：查看当前群绑定的 project。",
     "bind-project <序号|projectId>：绑定 project。",

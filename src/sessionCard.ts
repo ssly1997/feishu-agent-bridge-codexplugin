@@ -130,6 +130,16 @@ export function buildCodexHelpCard(options: {
         buttonCommand: "help"
       },
       {
+        command: "status",
+        description: "精简卡片查看当前工作状态",
+        buttonCommand: "status"
+      },
+      {
+        command: "status-full",
+        description: "完整卡片查看队列和 runtime 明细",
+        buttonCommand: "status-full"
+      },
+      {
         command: "list-project",
         description: "列出可绑定 project",
         buttonCommand: "list-project"
@@ -472,6 +482,8 @@ function parsePageValue(value: unknown): number {
 function isAllowedHelpCommand(command: string): boolean {
   return new Set([
     "help",
+    "status",
+    "status-full",
     "list-project",
     "current-project",
     "new-session",

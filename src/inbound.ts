@@ -18,8 +18,11 @@ import { assertAppCredentialsReady, ConfigError, CONFIG_DIR, CONFIG_PATH, loadCo
 import {
   enqueueCommand,
   getCommandQueueStats,
+  listCommands,
   resolveCommandQueuePath,
-  updateCommandStatusMetadata
+  updateCommandStatusMetadata,
+  type CommandQueueStats,
+  type SessionCommandStats
 } from "./commandQueue.js";
 import {
   findCodexSession,
@@ -41,6 +44,7 @@ import {
   parseCodexCardActionValue
 } from "./sessionCard.js";
 import { buildCommandStatusCard } from "./statusCard.js";
+import { readStandaloneListenerRuntimeStatus } from "./listenerRuntime.js";
 import type { CodexSession } from "./codexSessions.js";
 import type { AgentCommand, AgentCommandAttachment, BridgeConfig, NewAgentCommand } from "./types.js";
 
@@ -51,6 +55,7 @@ const SESSION_PAGE_SIZE = 10;
 const NEW_SESSION_DISCOVERY_RETRIES = 12;
 const NEW_SESSION_DISCOVERY_INTERVAL_MS = 250;
 const DEFAULT_NEW_SESSION_PROMPT = "新会话初始化";
+const STATUS_RECENT_COMMAND_LIMIT = 10;
 
 export type MessageReceiveEvent = Parameters<
   NonNullable<EventHandles["im.message.receive_v1"]>
@@ -95,6 +100,24 @@ interface ImageResourceCandidate {
   messageId: string;
   resourceKey: string;
   createdAtMs: number;
+}
+
+type RuntimeStatusSnapshot = Awaited<ReturnType<typeof readStandaloneListenerRuntimeStatus>>;
+
+interface WorkStatusContext {
+  config: BridgeConfig;
+  queuePath: string;
+  chatId: string;
+  binding?: ChatSessionBinding;
+  queue: CommandQueueStats;
+  runtime?: RuntimeStatusSnapshot;
+  sessionStats?: SessionCommandStats;
+  commands: AgentCommand[];
+  recentCommands: AgentCommand[];
+  runningCommands: AgentCommand[];
+  runningCommand?: AgentCommand;
+  nowMs: number;
+  currentSessionActive: boolean;
 }
 
 export class FeishuCommandListener {
@@ -528,6 +551,22 @@ export class FeishuCommandListener {
         page: control.page
       });
       this.logHandledControl("list-project", command);
+      return;
+    }
+
+    if (control.type === "status") {
+      const card = await this.buildCurrentChatWorkStatusCard(config, queuePath, command.chatId, {
+        full: control.full
+      });
+      await feishuClient.sendInteractiveMessageToReceiver(
+        config,
+        {
+          receiveIdType: "chat_id",
+          receiveId: command.chatId
+        },
+        card
+      );
+      this.logHandledControl("status", command);
       return;
     }
 
@@ -1225,6 +1264,47 @@ export class FeishuCommandListener {
     ].join("\n");
   }
 
+  private async buildCurrentChatWorkStatusCard(
+    config: BridgeConfig,
+    queuePath: string,
+    chatId: string,
+    options: { full: boolean }
+  ): Promise<Record<string, unknown>> {
+    const binding = await getChatSessionBinding(queuePath, chatId);
+    const queue = await getCommandQueueStats(queuePath);
+    const runtime = await readStandaloneListenerRuntimeStatus(this.options.configPath ?? CONFIG_PATH);
+    const sessionStats = binding?.sessionId
+      ? queue.sessions.find((item) => item.sessionId === binding.sessionId)
+      : undefined;
+    const commands = await listCommands(queuePath, {
+      sessionId: binding?.sessionId
+    });
+    const recentCommands = commands.slice(-STATUS_RECENT_COMMAND_LIMIT).reverse();
+    const nowMs = Date.now();
+    const activeSessions = runtime?.scheduler?.activeSessions ?? [];
+    const currentSessionActive = Boolean(binding?.sessionId && activeSessions.includes(binding.sessionId));
+    const runningCommands = commands
+      .filter((item) => item.state === "in_progress")
+      .reverse();
+    const context: WorkStatusContext = {
+      config,
+      queuePath,
+      chatId,
+      binding,
+      queue,
+      runtime,
+      sessionStats,
+      commands,
+      recentCommands,
+      runningCommands,
+      runningCommand: runningCommands[0],
+      nowMs,
+      currentSessionActive
+    };
+
+    return buildWorkStatusCard(context, options);
+  }
+
   private async unbindProjectForChat(
     config: BridgeConfig,
     queuePath: string,
@@ -1549,6 +1629,331 @@ function paginate<T>(items: T[], requestedPage: number, pageSize: number): {
       hasNext: page < totalPages
     }
   };
+}
+
+function buildWorkStatusCard(
+  context: WorkStatusContext,
+  options: { full: boolean }
+): Record<string, unknown> {
+  const elements: Array<Record<string, unknown>> = [
+    statusMarkdownBlock(formatStatusBindingSummary(context)),
+    { tag: "hr" },
+    statusMarkdownBlock(formatRunningTaskSummary(context)),
+    { tag: "hr" },
+    statusMarkdownBlock(formatQueueSummary(context)),
+    { tag: "hr" },
+    statusMarkdownBlock(formatRuntimeSummary(context))
+  ];
+
+  if (options.full) {
+    elements.push(
+      { tag: "hr" },
+      statusMarkdownBlock(formatFullRuntimeDetails(context)),
+      { tag: "hr" },
+      statusMarkdownBlock(formatFullRecentCommands(context)),
+      { tag: "hr" },
+      statusMarkdownBlock(formatFullConfigDetails(context))
+    );
+  } else {
+    elements.push(
+      { tag: "hr" },
+      statusMarkdownBlock("完整信息：发送 `status-full`。")
+    );
+  }
+
+  return statusCard(
+    options.full ? "当前工作状态（完整）" : "当前工作状态",
+    statusCardTemplate(context),
+    elements
+  );
+}
+
+function formatStatusBindingSummary(context: WorkStatusContext): string {
+  const binding = context.binding;
+  return [
+    "**绑定**",
+    binding?.projectDisplayLabel ? `project: ${truncateSingleLine(binding.projectDisplayLabel, 80)}` : "project: 未绑定",
+    binding?.sessionId
+      ? `session: ${truncateSingleLine(binding.sessionTitle || "(untitled)", 80)} (${shortId(binding.sessionId)})`
+      : "session: 未绑定",
+    binding?.sessionCwd ? `cwd: \`${truncateMiddle(binding.sessionCwd, 96)}\`` : undefined,
+    binding?.sessionGitBranch ? `branch: \`${truncateSingleLine(binding.sessionGitBranch, 48)}\`` : undefined
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function formatRunningTaskSummary(context: WorkStatusContext): string {
+  const command = context.runningCommand;
+  if (!command) {
+    return [
+      "**正在执行**",
+      "没有正在执行的任务。"
+    ].join("\n");
+  }
+
+  const extraCount = context.runningCommands.length - 1;
+  const runMs = command.claimedAt ? context.nowMs - Date.parse(command.claimedAt) : undefined;
+  const validRunMs = runMs !== undefined && Number.isFinite(runMs) ? Math.max(0, runMs) : undefined;
+  return [
+    "**正在执行**",
+    truncateSingleLine(command.text, 120),
+    `id: \`${shortId(command.id)}\`  attempts=${command.attempts}`,
+    validRunMs !== undefined ? `已运行: ${formatDuration(validRunMs)}` : undefined,
+    command.statusNotifyError
+      ? `状态卡: 异常，${truncateSingleLine(command.statusNotifyError, 100)}`
+      : command.statusMessageId
+        ? "状态卡: 正常"
+        : "状态卡: 未创建",
+    extraCount > 0 ? `另有 ${extraCount} 条 in_progress，请用 status-full 查看。` : undefined
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function formatQueueSummary(context: WorkStatusContext): string {
+  const sessionStats = context.sessionStats;
+  return [
+    "**队列**",
+    context.binding?.sessionId
+      ? `当前 session: pending=${sessionStats?.pending ?? 0} in_progress=${sessionStats?.inProgress ?? 0} done=${sessionStats?.done ?? 0} failed=${sessionStats?.failed ?? 0}`
+      : "当前 session: 未绑定",
+    `全局积压: pending=${context.queue.pending} in_progress=${context.queue.inProgress}`,
+    formatQueueHint({
+      hasSession: Boolean(context.binding?.sessionId),
+      currentSessionActive: context.currentSessionActive,
+      pending: sessionStats?.pending ?? context.commands.filter((item) => item.state === "pending").length,
+      inProgress: sessionStats?.inProgress ?? context.runningCommands.length,
+      runtimeReady: context.runtime?.ready ?? false,
+      runtimeRunning: context.runtime?.running ?? false
+    })
+  ].join("\n");
+}
+
+function formatRuntimeSummary(context: WorkStatusContext): string {
+  const runtime = context.runtime;
+  if (!runtime) {
+    return [
+      "**Runtime**",
+      "未检测到活跃 heartbeat。"
+    ].join("\n");
+  }
+
+  const scheduler = runtime.scheduler;
+  return [
+    "**Runtime**",
+    `ready=${runtime.ready} running=${runtime.running} managedBy=${runtime.managedBy}`,
+    scheduler
+      ? `scheduler active=${scheduler.activeSessions.length} current=${context.binding?.sessionId ? yesNo(context.currentSessionActive) : "n/a"}`
+      : "scheduler: 未上报",
+    scheduler
+      ? `recovery=${scheduler.recoveryRunning ? "running" : "idle"} recovered=${scheduler.lastRecoveredCount ?? 0}`
+      : undefined,
+    runtime.lastError ? `last error: ${truncateSingleLine(runtime.lastError, 100)}` : undefined
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function formatFullRuntimeDetails(context: WorkStatusContext): string {
+  return [
+    "**Runtime 详情**",
+    ...formatStatusRuntimeLines(context.runtime, {
+      currentSessionActive: context.currentSessionActive,
+      currentSessionId: context.binding?.sessionId
+    }).slice(1)
+  ].join("\n");
+}
+
+function formatFullRecentCommands(context: WorkStatusContext): string {
+  return [
+    `**最近任务**（最多 ${STATUS_RECENT_COMMAND_LIMIT} 条，最新在前）`,
+    ...formatStatusCommandLines(
+      context.recentCommands,
+      context.nowMs,
+      context.config.codex.inProgressTimeoutMs
+    )
+  ].join("\n");
+}
+
+function formatFullConfigDetails(context: WorkStatusContext): string {
+  return [
+    "**补充信息**",
+    `queue: \`${context.queuePath}\``,
+    `global: total=${context.queue.total} pending=${context.queue.pending} in_progress=${context.queue.inProgress} done=${context.queue.done} failed=${context.queue.failed}`,
+    `codex.enabled=${context.config.codex.enabled}`,
+    `codex.timeout=${formatDuration(context.config.codex.timeoutMs)}`,
+    `in_progress timeout=${formatDuration(context.config.codex.inProgressTimeoutMs)} recovery=${context.config.codex.inProgressRecovery}`
+  ].join("\n");
+}
+
+function statusCard(
+  title: string,
+  template: string,
+  elements: Array<Record<string, unknown>>
+): Record<string, unknown> {
+  return {
+    schema: "2.0",
+    config: {
+      update_multi: true,
+      wide_screen_mode: true
+    },
+    header: {
+      template,
+      title: {
+        tag: "plain_text",
+        content: title
+      }
+    },
+    body: {
+      elements
+    }
+  };
+}
+
+function statusMarkdownBlock(content: string): Record<string, unknown> {
+  return {
+    tag: "markdown",
+    content
+  };
+}
+
+function statusCardTemplate(context: WorkStatusContext): string {
+  if (context.runningCommand) return "blue";
+  if ((context.sessionStats?.pending ?? 0) > 0) return "yellow";
+  if (!context.runtime?.running || !context.runtime.ready) return "yellow";
+  return "green";
+}
+
+function formatStatusRuntimeLines(
+  runtime: Awaited<ReturnType<typeof readStandaloneListenerRuntimeStatus>>,
+  options: {
+    currentSessionActive: boolean;
+    currentSessionId?: string;
+  }
+): string[] {
+  if (!runtime) {
+    return [
+      "Runtime：",
+      "listener/runtime: 未检测到活跃 heartbeat（可能未启动、进程已退出，或心跳超过 30s）。"
+    ];
+  }
+
+  const scheduler = runtime.scheduler;
+  return [
+    "Runtime：",
+    `listener: running=${runtime.running} ready=${runtime.ready} managedBy=${runtime.managedBy}`,
+    `pid=${runtime.pid} processAlive=${runtime.processAlive}`,
+    `heartbeat=${formatIsoTime(runtime.updatedAt)}`,
+    runtime.startedAt ? `started=${formatIsoTime(runtime.startedAt)}` : undefined,
+    runtime.lastEventAt ? `last event=${formatIsoTime(runtime.lastEventAt)}` : undefined,
+    runtime.lastCommandAt ? `last command=${formatIsoTime(runtime.lastCommandAt)}` : undefined,
+    `received counters: enqueued=${runtime.enqueuedCount} ignored=${runtime.ignoredCount}`,
+    runtime.lastError ? `last error=${truncateSingleLine(runtime.lastError, 180)}` : undefined,
+    scheduler
+      ? `scheduler active sessions=${scheduler.activeSessions.length} current=${options.currentSessionId ? yesNo(options.currentSessionActive) : "n/a"}`
+      : "scheduler: 未上报",
+    scheduler
+      ? `scheduler recovery: running=${scheduler.recoveryRunning} last=${formatOptionalIsoTime(scheduler.lastRecoveryAt)} recovered=${scheduler.lastRecoveredCount ?? 0}`
+      : undefined,
+    scheduler?.lastRecoveryError
+      ? `scheduler recovery error=${truncateSingleLine(scheduler.lastRecoveryError, 180)}`
+      : undefined
+  ].filter((line): line is string => line !== undefined);
+}
+
+function formatStatusCommandLines(
+  commands: AgentCommand[],
+  nowMs: number,
+  timeoutMs: number
+): string[] {
+  if (commands.length === 0) return ["- 无任务记录。"];
+
+  return commands.flatMap((command) => {
+    const runMs = command.claimedAt ? nowMs - Date.parse(command.claimedAt) : undefined;
+    const validRunMs = runMs !== undefined && Number.isFinite(runMs) ? Math.max(0, runMs) : undefined;
+    const stale = command.state === "in_progress" &&
+      validRunMs !== undefined &&
+      validRunMs > timeoutMs;
+    const lines = [
+      [
+        `- [${command.state}] ${shortId(command.id)}`,
+        `attempts=${command.attempts}`,
+        command.receivedAt ? `received=${formatIsoTime(command.receivedAt)}` : undefined,
+        command.claimedAt ? `claimed=${formatIsoTime(command.claimedAt)}` : undefined,
+        command.completedAt ? `completed=${formatIsoTime(command.completedAt)}` : undefined,
+        validRunMs !== undefined ? `run=${formatDuration(validRunMs)}` : undefined,
+        command.statusMessageId ? `card=${shortId(command.statusMessageId)}` : "card=none",
+        stale ? "stale=yes" : undefined,
+        command.attachments?.length ? `attachments=${command.attachments.length}` : undefined
+      ].filter((item): item is string => item !== undefined).join(" "),
+      `  text: ${truncateSingleLine(command.text, 180)}`,
+      command.statusSummary ? `  card summary: ${truncateSingleLine(command.statusSummary, 180)}` : undefined,
+      command.statusUpdatedAt ? `  card updated: ${formatIsoTime(command.statusUpdatedAt)}` : undefined,
+      command.statusNotifyError ? `  card error: ${truncateSingleLine(command.statusNotifyError, 180)}` : undefined,
+      command.resultSummary ? `  result: ${truncateSingleLine(command.resultSummary, 180)}` : undefined
+    ].filter((line): line is string => line !== undefined);
+    return lines;
+  });
+}
+
+function formatQueueHint(options: {
+  hasSession: boolean;
+  currentSessionActive: boolean;
+  pending: number;
+  inProgress: number;
+  runtimeReady: boolean;
+  runtimeRunning: boolean;
+}): string {
+  if (!options.hasSession) {
+    return "判断：当前群未绑定 active session，普通任务不会入队；先 list-session 或 new-session。";
+  }
+  if (options.runtimeRunning && !options.runtimeReady) {
+    return "判断：runtime 已启动但暂未 ready，可能正在重启或重连；pending 会等 ready 后处理。";
+  }
+  if (!options.runtimeRunning) {
+    return "判断：runtime/listener 当前未运行或心跳过期，pending 任务不会自动推进。";
+  }
+  if (options.inProgress > 0) {
+    return options.currentSessionActive
+      ? "判断：当前 session 正在执行任务；同 session pending 会串行等待。"
+      : "判断：队列里有 in_progress 任务，但 scheduler 未上报当前 session active；需要关注是否已卡住。";
+  }
+  if (options.pending > 0) {
+    return "判断：当前 session 有 pending 任务，runtime 可用时会按收到时间串行处理。";
+  }
+  return "判断：当前 session 没有 pending / in_progress 任务。";
+}
+
+function formatIsoTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatOptionalIsoTime(value: string | undefined): string {
+  return value ? formatIsoTime(value) : "never";
+}
+
+function formatDuration(valueMs: number): string {
+  const ms = Math.max(0, valueMs);
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainingSeconds}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function truncateSingleLine(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+function truncateMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const keep = Math.max(4, Math.floor((maxLength - 1) / 2));
+  return `${value.slice(0, keep)}…${value.slice(-keep)}`;
+}
+
+function yesNo(value: boolean): string {
+  return value ? "yes" : "no";
 }
 
 export function extractCommandFromMessage(

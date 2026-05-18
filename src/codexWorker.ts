@@ -11,7 +11,8 @@ import { FeishuApiError, FeishuClient } from "./feishuClient.js";
 import { runCodexResume, type CodexProgressEvent, type CodexResumeResult } from "./codexCli.js";
 import {
   handleCodexSessionControlCommand,
-  parseCodexSessionControlCommand
+  parseCodexSessionControlCommand,
+  type CodexSessionControlCommand
 } from "./codexSessions.js";
 import { buildCommandStatusCard, type CommandStatusPhase } from "./statusCard.js";
 import type { AgentCommand, BridgeConfig, NotifyStatus } from "./types.js";
@@ -32,7 +33,7 @@ export interface CodexCommandProcessResult {
   command?: AgentCommand;
   codex?: CodexResumeResult;
   ackState?: "done" | "failed";
-  control?: "help" | "current-project" | "current-session" | "list-project" | "select-project" | "new-session" | "list-session" | "select-session" | "unbind-project" | "unbind-session";
+  control?: CodexSessionControlCommand["type"];
   summary?: string;
   notification?: "sent" | "updated" | "skipped";
   notifyError?: string;

@@ -165,7 +165,20 @@ test("parseCodexSessionControlCommand recognizes current and switch aliases", ()
     type: "current-project"
   });
   assert.deepEqual(parseCodexSessionControlCommand("session-status"), {
-    type: "current-session"
+    type: "status",
+    full: false
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("status"), {
+    type: "status",
+    full: false
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("status-full"), {
+    type: "status",
+    full: true
+  });
+  assert.deepEqual(parseCodexSessionControlCommand("任务状态"), {
+    type: "status",
+    full: false
   });
   assert.deepEqual(parseCodexSessionControlCommand("switch-session 1"), {
     type: "select-session",

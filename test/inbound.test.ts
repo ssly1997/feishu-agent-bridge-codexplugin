@@ -13,11 +13,18 @@ import {
   upsertChatSessionBinding
 } from "../src/chatBindings.js";
 import { listCodexProjects } from "../src/codexSessions.js";
-import { listCommands } from "../src/commandQueue.js";
+import {
+  ackCommand,
+  enqueueCommand,
+  getNextCommand,
+  listCommands,
+  updateCommandStatusMetadata
+} from "../src/commandQueue.js";
 import { FeishuClient } from "../src/feishuClient.js";
 import { extractCommandFromMessage, FeishuCommandListener } from "../src/inbound.js";
+import { listenerRuntimeStatusPath } from "../src/listenerRuntime.js";
 import type { MessageReceiveEvent } from "../src/inbound.js";
-import type { BridgeConfig, ReceiveIdType } from "../src/types.js";
+import type { BridgeConfig, NewAgentCommand, ReceiveIdType } from "../src/types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -280,6 +287,162 @@ test("listener handles current-session directly without enqueueing", async () =>
     assert.equal((await listCommands(queuePath)).length, 0);
     assert.equal(client.texts.length, 1);
     assert.match(client.texts[0].text, /当前群没有绑定 Codex project/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener reports current session status with runtime and queue details", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-status-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true,
+        timeoutMs: 120_000,
+        inProgressTimeoutMs: 60_000,
+        inProgressRecovery: "mark_failed" as const
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+    const first = await enqueueCommand(makeQueuedInput("om_status_1", "正在处理 A"), queuePath);
+    const claimed = await getNextCommand(queuePath, { claim: true, sessionId: "session_new" });
+    assert.equal(claimed?.id, first.command.id);
+    await updateCommandStatusMetadata(first.command.id, queuePath, {
+      statusMessageId: "om_card_1",
+      statusUpdatedAt: new Date().toISOString(),
+      statusSummary: "Codex CLI 已开始处理这条飞书指令。"
+    });
+    await enqueueCommand(makeQueuedInput("om_status_2", "等待处理 B"), queuePath);
+    const done = await enqueueCommand(makeQueuedInput("om_status_3", "已经完成 C"), queuePath);
+    await ackCommand(done.command.id, "done", queuePath, "处理完成");
+    await writeFile(
+      listenerRuntimeStatusPath(configPath),
+      JSON.stringify({
+        managedBy: "runtime",
+        pid: process.pid,
+        processAlive: true,
+        updatedAt: new Date().toISOString(),
+        runtimeStatusPath: listenerRuntimeStatusPath(configPath),
+        running: true,
+        ready: true,
+        configPath,
+        queuePath,
+        startedAt: "2026-05-18T00:00:00.000Z",
+        enqueuedCount: 3,
+        ignoredCount: 0,
+        scheduler: {
+          activeSessions: ["session_new"],
+          recoveryRunning: false,
+          lastRecoveryAt: "2026-05-18T00:01:00.000Z",
+          lastRecoveredCount: 0
+        }
+      }),
+      "utf8"
+    );
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      messageId: "om_status_control",
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> status"
+      }),
+      mentions: [
+        {
+          key: "@_user_1",
+          id: { open_id: "ou_bot" },
+          name: "Agent"
+        }
+      ]
+    }), config, client);
+
+    assert.equal((await listCommands(queuePath)).length, 3);
+    assert.equal(client.texts.length, 0);
+    assert.equal(client.cards.length, 1);
+    const statusCardText = JSON.stringify(client.cards[0].card);
+    assert.match(statusCardText, /当前工作状态/);
+    assert.match(statusCardText, /正在执行/);
+    assert.match(statusCardText, /正在处理 A/);
+    assert.match(statusCardText, /当前 session: pending=1 in_progress=1 done=1 failed=0/);
+    assert.match(statusCardText, /ready=true running=true managedBy=runtime/);
+    assert.match(statusCardText, /完整信息.*status-full/);
+    assert.doesNotMatch(statusCardText, /最近任务/);
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      messageId: "om_status_full_control",
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> status-full"
+      }),
+      mentions: [
+        {
+          key: "@_user_1",
+          id: { open_id: "ou_bot" },
+          name: "Agent"
+        }
+      ]
+    }), config, client);
+
+    assert.equal(client.cards.length, 2);
+    const fullCardText = JSON.stringify(client.cards[1].card);
+    assert.match(fullCardText, /当前工作状态（完整）/);
+    assert.match(fullCardText, /Runtime 详情/);
+    assert.match(fullCardText, /最近任务/);
+    assert.match(fullCardText, /等待处理 B/);
+    assert.match(fullCardText, /Codex CLI 已开始处理/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listener status card says when there is no running task", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "fab-inbound-status-empty-"));
+  const queuePath = join(dir, "commands.db");
+  const configPath = join(dir, "config.json");
+  const client = new FakeFeishuClient();
+  const listener = new FeishuCommandListener({ configPath });
+  try {
+    const config = {
+      ...DEFAULT_CONFIG,
+      enabled: true,
+      inbound: {
+        ...DEFAULT_CONFIG.inbound,
+        enabled: true,
+        botOpenId: "ou_bot",
+        queueDbPath: queuePath
+      },
+      codex: {
+        ...DEFAULT_CONFIG.codex,
+        enabled: true
+      }
+    };
+    await writeFile(configPath, JSON.stringify(config), "utf8");
+    await bindChat(queuePath, "oc_test", "session_new", "当前群");
+
+    await invokeMessageReceive(listener, makeMessageEvent({
+      messageId: "om_status_empty",
+      content: JSON.stringify({
+        text: "<at user_id=\"ou_bot\">Agent</at> status"
+      }),
+      mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }]
+    }), config, client);
+
+    assert.equal(client.cards.length, 1);
+    const cardText = JSON.stringify(client.cards[0].card);
+    assert.match(cardText, /没有正在执行的任务/);
+    assert.match(cardText, /"template":"yellow"/);
+    assert.doesNotMatch(cardText, /"template":"red"/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1562,6 +1725,24 @@ async function bindChat(
       gitBranch: sessionId === "session_new" ? "main" : undefined
     }
   });
+}
+
+function makeQueuedInput(messageId: string, text: string): NewAgentCommand {
+  return {
+    text,
+    rawText: text,
+    messageId,
+    chatId: "oc_test",
+    chatType: "group",
+    sender: { openId: "ou_sender" },
+    createdAt: "1710000000000",
+    sessionId: "session_new",
+    sessionTitle: "最新会话",
+    sessionCwd: "/tmp/new",
+    sessionSource: "vscode",
+    sessionGitBranch: "main",
+    sessionUpdatedAt: 2000
+  };
 }
 
 function makeMessageEvent(options: {
