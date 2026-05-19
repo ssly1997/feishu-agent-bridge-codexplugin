@@ -115,7 +115,7 @@ JSON
 1. 打开 Codex 的插件页，点击添加插件市场。
 2. 来源填写 GitHub 仓库，例如 `https://github.com/ssly1997/feishu-agent-bridge-codexplugin`，也可以填 `ssly1997/feishu-agent-bridge-codexplugin` 或 `git@github.com:ssly1997/feishu-agent-bridge-codexplugin.git`。
 3. Git 引用填写 `main`，或填写你要测试的 tag / branch。
-4. 稀疏路径留空。本仓库的插件元数据在仓库根目录；只有插件位于 monorepo 子目录时才需要填写类似 `plugins/codex` 的路径。
+4. 稀疏路径留空。本仓库的 marketplace 清单在仓库根目录的 `.agents/plugins/marketplace.json`，插件根也在仓库根目录。输入框里的 `plugins/codex` 是占位示例，不要填进去；只有 marketplace 位于 monorepo 子目录时才需要填写稀疏路径。
 5. 添加市场后，安装或启用 `Feishu Agent Bridge`，然后重启 Codex 或刷新插件列表。
 
 本地开发时也可以用命令行安装：
@@ -183,6 +183,7 @@ corepack pnpm runtime:stop
 
 仓库根目录已经包含 Codex 插件结构：
 
+- `.agents/plugins/marketplace.json`：给 Codex GUI / CLI 添加插件市场时读取的 marketplace 入口。
 - `.codex-plugin/plugin.json`：插件展示信息、Skill 和 MCP 入口声明。
 - `.mcp.json`：插件模式下的 MCP server 声明。
 - `skills/feishu-agent-bridge/SKILL.md`：给 Codex 的项目内操作说明。
@@ -196,9 +197,9 @@ corepack pnpm runtime:stop
 | --- | --- |
 | 来源 | `https://github.com/ssly1997/feishu-agent-bridge-codexplugin`，或 `ssly1997/feishu-agent-bridge-codexplugin`，或 `git@github.com:ssly1997/feishu-agent-bridge-codexplugin.git` |
 | Git 引用 | `main`，也可以填 tag / branch |
-| 稀疏路径 | 留空。本仓库插件就在 repo root；如果以后放进 monorepo 子目录，再填写包含 `.codex-plugin/plugin.json` 的目录 |
+| 稀疏路径 | 留空。本仓库的 marketplace 就在 repo root；如果以后放进 monorepo 子目录，再填写包含 `.agents/plugins/marketplace.json` 的目录 |
 
-添加市场后，在插件列表中安装或启用 `Feishu Agent Bridge`。如果已经配置好 `~/.feishu-agent-bridge/config.json` 且 `inbound.enabled=true`，插件加载时会尝试幂等 ensure `fab-runtime`；否则只加载 MCP tools，不会静默启动入站 listener。
+添加市场后，在插件列表中安装或启用 `Feishu Agent Bridge`。如果 Codex GUI 的稀疏路径输入框显示灰色的 `plugins/codex`，那只是示例占位，保持为空即可。如果已经配置好 `~/.feishu-agent-bridge/config.json` 且 `inbound.enabled=true`，插件加载时会尝试幂等 ensure `fab-runtime`；否则只加载 MCP tools，不会静默启动入站 listener。
 
 安装完成后重启 Codex，或在 Codex 里刷新插件列表，然后用 `feishu_status` 和 `feishu_send_test` 验证。
 
