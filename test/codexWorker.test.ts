@@ -105,7 +105,8 @@ writeFileSync(outputPath, "Codex handled: " + prompt);
         createdAt: "1710000000000",
         sessionId: "session_1",
         sessionTitle: "Session 1",
-        sessionCwd: dir
+        sessionCwd: dir,
+        sessionGitBranch: "stale-main"
       },
       queuePath
     );

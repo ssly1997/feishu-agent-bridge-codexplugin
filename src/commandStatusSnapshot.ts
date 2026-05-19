@@ -26,7 +26,6 @@ export async function resolveCommandStatusSnapshot(
   const gitBranch = options.refreshGitBranch
     ? await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd)
     : existing.gitBranch
-      ?? command.sessionGitBranch
       ?? await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
 
   const needsModelStatus = existing.model === undefined
