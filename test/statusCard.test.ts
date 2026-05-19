@@ -64,5 +64,6 @@ test("done status card keeps actionable conclusion details", () => {
   assert.doesNotMatch(text, /退出码/);
   assert.doesNotMatch(text, /附件：/);
   assert.doesNotMatch(text, /Artifacts/);
+  assert.doesNotMatch(text, /再次执行/);
   assert.doesNotMatch(text, /fcmd_detail/);
 });
