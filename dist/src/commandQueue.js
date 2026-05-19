@@ -140,6 +140,18 @@ export async function updateCommandStatusMetadata(id, queuePath = DEFAULT_COMMAN
             : undefined,
         hasOwn(patch, "statusSummary")
             ? `status_summary = ${sqlValue(patch.statusSummary)}`
+            : undefined,
+        hasOwn(patch, "statusGitBranch")
+            ? `status_git_branch = ${sqlValue(patch.statusGitBranch)}`
+            : undefined,
+        hasOwn(patch, "statusModel")
+            ? `status_model = ${sqlValue(patch.statusModel)}`
+            : undefined,
+        hasOwn(patch, "statusReasoningEffort")
+            ? `status_reasoning_effort = ${sqlValue(patch.statusReasoningEffort)}`
+            : undefined,
+        hasOwn(patch, "statusFastModeEnabled")
+            ? `status_fast_mode_enabled = ${sqlBoolean(patch.statusFastModeEnabled)}`
             : undefined
     ].filter((item) => Boolean(item));
     if (assignments.length === 0) {
@@ -253,7 +265,8 @@ async function insertCommand(queuePath, command) {
       event_id, tenant_key, created_at, received_at, session_id, session_title, session_cwd,
       session_source, session_git_branch, session_updated_at, claimed_at, completed_at,
       attempts, result_summary, status_message_id, status_updated_at, status_notify_error,
-      status_summary, model, project_id, project_kind, project_root_path, project_display_name,
+      status_summary, status_git_branch, status_model, status_reasoning_effort,
+      status_fast_mode_enabled, model, project_id, project_kind, project_root_path, project_display_name,
       project_secondary_name, project_display_label, project_label_source, attachments_json
     ) values (
       ${sqlValue(command.id)}, ${sqlValue(command.state)}, ${sqlValue(command.text)},
@@ -266,7 +279,9 @@ async function insertCommand(queuePath, command) {
       ${sqlValue(command.claimedAt)}, ${sqlValue(command.completedAt)}, ${command.attempts},
       ${sqlValue(command.resultSummary)}, ${sqlValue(command.statusMessageId)},
       ${sqlValue(command.statusUpdatedAt)}, ${sqlValue(command.statusNotifyError)},
-      ${sqlValue(command.statusSummary)}, ${sqlValue(command.model)}, ${sqlValue(command.projectId)}, ${sqlValue(command.projectKind)},
+      ${sqlValue(command.statusSummary)}, ${sqlValue(command.statusGitBranch)}, ${sqlValue(command.statusModel)},
+      ${sqlValue(command.statusReasoningEffort)}, ${sqlBoolean(command.statusFastModeEnabled)},
+      ${sqlValue(command.model)}, ${sqlValue(command.projectId)}, ${sqlValue(command.projectKind)},
       ${sqlValue(command.projectRootPath)}, ${sqlValue(command.projectDisplayName)},
       ${sqlValue(command.projectSecondaryName)}, ${sqlValue(command.projectDisplayLabel)},
       ${sqlValue(command.projectLabelSource)}, ${sqlValue(JSON.stringify(command.attachments ?? []))}
@@ -312,6 +327,10 @@ async function ensureSchema(queuePath) {
        status_updated_at text,
        status_notify_error text,
        status_summary text,
+       status_git_branch text,
+       status_model text,
+       status_reasoning_effort text,
+       status_fast_mode_enabled integer,
        project_id text,
        project_kind text,
        project_root_path text,
@@ -336,6 +355,10 @@ async function ensureCommandStatusColumns(queuePath) {
         ["status_updated_at", "text"],
         ["status_notify_error", "text"],
         ["status_summary", "text"],
+        ["status_git_branch", "text"],
+        ["status_model", "text"],
+        ["status_reasoning_effort", "text"],
+        ["status_fast_mode_enabled", "integer"],
         ["model", "text"],
         ["project_id", "text"],
         ["project_kind", "text"],
@@ -432,6 +455,12 @@ function rowToCommand(row) {
         statusUpdatedAt: row.status_updated_at ?? undefined,
         statusNotifyError: row.status_notify_error ?? undefined,
         statusSummary: row.status_summary ?? undefined,
+        statusGitBranch: row.status_git_branch ?? undefined,
+        statusModel: row.status_model ?? undefined,
+        statusReasoningEffort: row.status_reasoning_effort ?? undefined,
+        statusFastModeEnabled: row.status_fast_mode_enabled === null
+            ? undefined
+            : row.status_fast_mode_enabled === 1,
         attachments: parseAttachments(row.attachments_json)
     };
 }
@@ -484,6 +513,10 @@ function normalizeLegacyCommand(value) {
         statusUpdatedAt: stringValue(value.statusUpdatedAt),
         statusNotifyError: stringValue(value.statusNotifyError),
         statusSummary: stringValue(value.statusSummary),
+        statusGitBranch: stringValue(value.statusGitBranch),
+        statusModel: stringValue(value.statusModel),
+        statusReasoningEffort: stringValue(value.statusReasoningEffort),
+        statusFastModeEnabled: booleanValue(value.statusFastModeEnabled),
         attachments: Array.isArray(value.attachments)
             ? value.attachments.filter((item) => (isRecord(item) && item.type === "image")).map((item) => ({
                 type: "image",
@@ -542,6 +575,11 @@ function sqlValue(value) {
 function sqlNumber(value) {
     return value === undefined ? "null" : String(value);
 }
+function sqlBoolean(value) {
+    if (value === undefined || value === null)
+        return "null";
+    return value ? "1" : "0";
+}
 function positiveInteger(value) {
     return Number.isInteger(value) && Number(value) > 0;
 }
@@ -555,6 +593,9 @@ function stringValue(value) {
 }
 function numberValue(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+function booleanValue(value) {
+    return typeof value === "boolean" ? value : undefined;
 }
 function hasOwn(value, key) {
     return Object.prototype.hasOwnProperty.call(value, key);

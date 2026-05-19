@@ -10,6 +10,7 @@ import { findCodexSession, findCodexProject, formatSelectedSessionWithSummary, l
 import { readCodexMcpList } from "./codexMcp.js";
 import { resolveCodexModelStatus } from "./codexModels.js";
 import { runCodexNewSession } from "./codexCli.js";
+import { commandStatusSnapshotPatch, resolveCommandStatusSnapshot } from "./commandStatusSnapshot.js";
 import { FeishuClient } from "./feishuClient.js";
 import { formatGitBranchLine, formatGitBranchValueForCwd, readGitWorkingTreeStatus } from "./gitStatus.js";
 import { buildCodexFeatureDetailCard, buildCodexFeatureCard, buildCodexModelCard, buildCodexMcpListCard, buildCodexHelpCard, buildCodexProjectListCard, buildCodexSessionListCard, parseCodexCardActionValue } from "./sessionCard.js";
@@ -285,12 +286,7 @@ export class FeishuCommandListener {
         const statusSummary = "任务已收到，正在等待 runtime 调度。";
         const statusUpdatedAt = new Date().toISOString();
         try {
-            const gitBranch = await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
-            const modelStatus = await resolveCodexModelStatus({
-                sessionModel: command.model,
-                bridgeModel: config.codex.model,
-                codexCommand: config.codex.command
-            });
+            const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
             const result = await feishuClient.sendInteractiveMessageToReceiver(config, {
                 receiveIdType: "chat_id",
                 receiveId: command.chatId
@@ -298,16 +294,17 @@ export class FeishuCommandListener {
                 phase: "queued",
                 progressSummary: statusSummary,
                 nowMs: Date.parse(statusUpdatedAt),
-                gitBranch,
-                model: modelStatus.effectiveModel,
-                reasoningEffort: modelStatus.reasoningEffort,
-                fastModeEnabled: modelStatus.fastModeEnabled
+                gitBranch: statusSnapshot.gitBranch,
+                model: statusSnapshot.model,
+                reasoningEffort: statusSnapshot.reasoningEffort,
+                fastModeEnabled: statusSnapshot.fastModeEnabled
             }));
             const updated = await updateCommandStatusMetadata(command.id, queuePath, {
                 statusMessageId: result.messageId,
                 statusUpdatedAt,
                 statusNotifyError: result.messageId ? null : "Feishu status card did not return message_id",
-                statusSummary
+                statusSummary,
+                ...commandStatusSnapshotPatch(statusSnapshot)
             });
             stderrLogger.info("[inbound]", "sent queued status card", JSON.stringify({
                 commandId: command.id,

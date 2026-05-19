@@ -160,6 +160,10 @@ export interface AgentCommand {
   statusUpdatedAt?: string;
   statusNotifyError?: string;
   statusSummary?: string;
+  statusGitBranch?: string;
+  statusModel?: string;
+  statusReasoningEffort?: string;
+  statusFastModeEnabled?: boolean;
   attachments?: AgentCommandAttachment[];
 }
 

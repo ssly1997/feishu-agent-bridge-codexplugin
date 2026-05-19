@@ -179,10 +179,12 @@ test("processNextCodexCommand updates an existing status card while running and 
     await writeFile(
       scriptPath,
       `#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 const outputPath = args[args.indexOf("-o") + 1];
 readFileSync(0, "utf8");
+execFileSync("git", ["checkout", "-b", "feature/progress-card-drift"], { stdio: "ignore" });
 console.log(JSON.stringify({ type: "response_item", payload: { type: "function_call", name: "exec_command", arguments: "{\\\\\\"cmd\\\\\\":\\\\\\"secret\\\\\\"}" } }));
 console.log(JSON.stringify({ type: "event_msg", payload: { type: "agent_message", phase: "commentary", message: "测试已经通过一半" } }));
 writeFileSync(outputPath, "全部完成");
@@ -263,6 +265,7 @@ writeFileSync(outputPath, "全部完成");
     assert.match(cards, /Working directory/);
     assert.match(cards, /Git branch/);
     assert.match(cards, /feature\/progress-card/);
+    assert.doesNotMatch(cards, /feature\/progress-card-drift/);
     assert.doesNotMatch(cards, /有效仓库/);
     assert.doesNotMatch(cards, /secret/);
   } finally {

@@ -634,6 +634,8 @@ test("listener enqueues normal commands with an immutable Codex session snapshot
     assert.equal(commands[0].sessionTitle, "最新会话");
     assert.equal(commands[0].sessionCwd, "/tmp/new");
     assert.equal(commands[0].model, "gpt-5.4-mini");
+    assert.equal(commands[0].statusGitBranch, "main");
+    assert.equal(commands[0].statusModel, "gpt-5.4-mini");
     assert.equal(commands[0].statusMessageId, "om_fake_card");
     assert.match(commands[0].statusSummary ?? "", /等待 runtime 调度/);
     assert.equal(client.cards.length, 1);
@@ -641,6 +643,9 @@ test("listener enqueues normal commands with an immutable Codex session snapshot
     assert.match(statusCardText, /当前模型：gpt-5\.4-mini/);
     assert.match(statusCardText, /智能等级：/);
     assert.match(statusCardText, /快速模式：/);
+    assert.match(statusCardText, /Git branch/);
+    assert.match(statusCardText, /main/);
+    assert.doesNotMatch(statusCardText, /非有效 git 仓库/);
     assert.equal(client.texts.length, 0);
     assert.equal(wokenSessionId, "session_new");
   } finally {

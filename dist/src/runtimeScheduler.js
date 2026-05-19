@@ -2,8 +2,7 @@ import { getPendingSessionIds, recoverInProgressCommandRecords, resolveCommandQu
 import { CONFIG_PATH, loadConfig } from "./config.js";
 import { FeishuClient } from "./feishuClient.js";
 import { processNextCodexCommand } from "./codexWorker.js";
-import { formatGitBranchValueForCwd } from "./gitStatus.js";
-import { resolveCodexModelStatus } from "./codexModels.js";
+import { commandStatusSnapshotPatch, resolveCommandStatusSnapshot } from "./commandStatusSnapshot.js";
 import { buildCommandStatusCard } from "./statusCard.js";
 export class CodexRuntimeScheduler {
     options;
@@ -130,26 +129,22 @@ export class CodexRuntimeScheduler {
         }
         try {
             const phase = command.state === "failed" ? "failed" : "queued";
-            const gitBranch = await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
-            const modelStatus = await resolveCodexModelStatus({
-                sessionModel: command.model,
-                bridgeModel: config.codex.model,
-                codexCommand: config.codex.command
-            });
+            const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
             await (this.options.feishuClient ?? new FeishuClient()).updateInteractiveMessage(config, command.statusMessageId, buildCommandStatusCard(command, config, {
                 phase,
                 nowMs: Date.parse(statusUpdatedAt),
                 progressSummary: phase === "queued" ? summary : undefined,
                 resultSummary: phase === "failed" ? summary : undefined,
-                gitBranch,
-                model: modelStatus.effectiveModel,
-                reasoningEffort: modelStatus.reasoningEffort,
-                fastModeEnabled: modelStatus.fastModeEnabled
+                gitBranch: statusSnapshot.gitBranch,
+                model: statusSnapshot.model,
+                reasoningEffort: statusSnapshot.reasoningEffort,
+                fastModeEnabled: statusSnapshot.fastModeEnabled
             }));
             await updateCommandStatusMetadata(command.id, queuePath, {
                 statusUpdatedAt,
                 statusNotifyError: null,
-                statusSummary: summary
+                statusSummary: summary,
+                ...commandStatusSnapshotPatch(statusSnapshot)
             });
         }
         catch (error) {

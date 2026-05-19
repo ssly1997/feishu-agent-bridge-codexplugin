@@ -6,8 +6,7 @@ import { ackCommand, getNextCommand, resolveCommandQueuePath, updateCommandStatu
 import { FeishuApiError, FeishuClient } from "./feishuClient.js";
 import { progressSummaryFromJsonLine, runCodexResume } from "./codexCli.js";
 import { findCodexSession, handleCodexSessionControlCommand, parseCodexSessionControlCommand } from "./codexSessions.js";
-import { formatGitBranchValueForCwd } from "./gitStatus.js";
-import { resolveCodexModelStatus } from "./codexModels.js";
+import { commandStatusSnapshotPatch, resolveCommandStatusSnapshot } from "./commandStatusSnapshot.js";
 import { buildCommandStatusCard } from "./statusCard.js";
 const PROGRESS_UPDATE_INTERVAL_MS = 10_000;
 const INITIAL_CLI_HANDOFF_PROGRESS_SUMMARY = "已交接给 Codex CLI 处理。";
@@ -233,12 +232,7 @@ async function updateCommandStatusCard(config, queuePath, command, phase, status
         return { command: updated ?? command, notification: "skipped" };
     }
     try {
-        const gitBranch = await formatCommandGitBranch(config, command);
-        const modelStatus = await resolveCodexModelStatus({
-            sessionModel: command.model,
-            bridgeModel: config.codex.model,
-            codexCommand: config.codex.command
-        });
+        const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
         await feishuClient.updateInteractiveMessage(config, command.statusMessageId, buildCommandStatusCard(command, config, {
             phase,
             nowMs: options.nowMs,
@@ -249,15 +243,16 @@ async function updateCommandStatusCard(config, queuePath, command, phase, status
             exitCode: options.codex?.exitCode,
             signal: options.codex?.signal,
             timedOut: options.codex?.timedOut,
-            gitBranch,
-            model: modelStatus.effectiveModel,
-            reasoningEffort: modelStatus.reasoningEffort,
-            fastModeEnabled: modelStatus.fastModeEnabled
+            gitBranch: statusSnapshot.gitBranch,
+            model: statusSnapshot.model,
+            reasoningEffort: statusSnapshot.reasoningEffort,
+            fastModeEnabled: statusSnapshot.fastModeEnabled
         }));
         const updated = await updateCommandStatusMetadata(command.id, queuePath, {
             statusUpdatedAt,
             statusNotifyError: null,
-            statusSummary
+            statusSummary,
+            ...commandStatusSnapshotPatch(statusSnapshot)
         });
         return { command: updated ?? command, notification: "updated" };
     }
@@ -280,14 +275,14 @@ async function notifyCommandResult(config, command, ackState, title, summary, co
         return { notification: "skipped" };
     }
     const status = ackState === "done" ? "success" : "failed";
-    const gitBranch = await formatCommandGitBranch(config, command);
+    const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
     const card = buildNotificationCard({
         source: "codex-cli",
         title,
         status,
         summary,
         cwd: command.sessionCwd ?? config.codex.cwd,
-        gitBranch,
+        gitBranch: statusSnapshot.gitBranch,
         projectLabel: command.projectDisplayLabel,
         codexSessionId: command.sessionId,
         codexSessionTitle: command.sessionTitle,
@@ -312,9 +307,6 @@ async function notifyCommandResult(config, command, ackState, title, summary, co
     catch (error) {
         return { notification: "skipped", error: formatError(error) };
     }
-}
-function formatCommandGitBranch(config, command) {
-    return formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
 }
 function summarizeCodexResult(result) {
     const body = result.lastMessage.trim() || result.stdout.trim() || result.stderr.trim();

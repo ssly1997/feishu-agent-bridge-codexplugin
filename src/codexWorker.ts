@@ -21,8 +21,10 @@ import {
   parseCodexSessionControlCommand,
   type CodexSessionControlCommand
 } from "./codexSessions.js";
-import { formatGitBranchValueForCwd } from "./gitStatus.js";
-import { resolveCodexModelStatus } from "./codexModels.js";
+import {
+  commandStatusSnapshotPatch,
+  resolveCommandStatusSnapshot
+} from "./commandStatusSnapshot.js";
 import { buildCommandStatusCard, type CommandStatusPhase } from "./statusCard.js";
 import type { AgentCommand, BridgeConfig, NotifyStatus } from "./types.js";
 
@@ -398,12 +400,7 @@ async function updateCommandStatusCard(
   }
 
   try {
-    const gitBranch = await formatCommandGitBranch(config, command);
-    const modelStatus = await resolveCodexModelStatus({
-      sessionModel: command.model,
-      bridgeModel: config.codex.model,
-      codexCommand: config.codex.command
-    });
+    const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
     await feishuClient.updateInteractiveMessage(
       config,
       command.statusMessageId,
@@ -417,16 +414,17 @@ async function updateCommandStatusCard(
         exitCode: options.codex?.exitCode,
         signal: options.codex?.signal,
         timedOut: options.codex?.timedOut,
-        gitBranch,
-        model: modelStatus.effectiveModel,
-        reasoningEffort: modelStatus.reasoningEffort,
-        fastModeEnabled: modelStatus.fastModeEnabled
+        gitBranch: statusSnapshot.gitBranch,
+        model: statusSnapshot.model,
+        reasoningEffort: statusSnapshot.reasoningEffort,
+        fastModeEnabled: statusSnapshot.fastModeEnabled
       })
     );
     const updated = await updateCommandStatusMetadata(command.id, queuePath, {
       statusUpdatedAt,
       statusNotifyError: null,
-      statusSummary
+      statusSummary,
+      ...commandStatusSnapshotPatch(statusSnapshot)
     });
     return { command: updated ?? command, notification: "updated" };
   } catch (error) {
@@ -458,7 +456,7 @@ async function notifyCommandResult(
   }
 
   const status: NotifyStatus = ackState === "done" ? "success" : "failed";
-  const gitBranch = await formatCommandGitBranch(config, command);
+  const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
   const card = buildNotificationCard(
     {
       source: "codex-cli",
@@ -466,7 +464,7 @@ async function notifyCommandResult(
       status,
       summary,
       cwd: command.sessionCwd ?? config.codex.cwd,
-      gitBranch,
+      gitBranch: statusSnapshot.gitBranch,
       projectLabel: command.projectDisplayLabel,
       codexSessionId: command.sessionId,
       codexSessionTitle: command.sessionTitle,
@@ -497,10 +495,6 @@ async function notifyCommandResult(
   } catch (error) {
     return { notification: "skipped", error: formatError(error) };
   }
-}
-
-function formatCommandGitBranch(config: BridgeConfig, command: AgentCommand): Promise<string> {
-  return formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
 }
 
 function summarizeCodexResult(result: CodexResumeResult): string {
