@@ -9,28 +9,42 @@ export interface CommandStatusSnapshot {
   fastModeEnabled?: boolean;
 }
 
+export interface CommandStatusSnapshotOptions {
+  refreshGitBranch?: boolean;
+}
+
 export async function resolveCommandStatusSnapshot(
   config: BridgeConfig,
-  command: AgentCommand
+  command: AgentCommand,
+  options: CommandStatusSnapshotOptions = {}
 ): Promise<CommandStatusSnapshot> {
   const existing = commandStatusSnapshotFromCommand(command);
-  if (hasCommandStatusSnapshot(command)) {
+  if (hasCommandStatusSnapshot(command) && !options.refreshGitBranch) {
     return existing;
   }
 
-  const gitBranch = command.sessionGitBranch
-    ?? await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
-  const modelStatus = await resolveCodexModelStatus({
-    sessionModel: command.model,
-    bridgeModel: config.codex.model,
-    codexCommand: config.codex.command
-  });
+  const gitBranch = options.refreshGitBranch
+    ? await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd)
+    : existing.gitBranch
+      ?? command.sessionGitBranch
+      ?? await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
+
+  const needsModelStatus = existing.model === undefined
+    || existing.reasoningEffort === undefined
+    || existing.fastModeEnabled === undefined;
+  const modelStatus = needsModelStatus
+    ? await resolveCodexModelStatus({
+        sessionModel: command.model,
+        bridgeModel: config.codex.model,
+        codexCommand: config.codex.command
+      })
+    : undefined;
 
   return {
     gitBranch,
-    model: modelStatus.effectiveModel,
-    reasoningEffort: modelStatus.reasoningEffort,
-    fastModeEnabled: modelStatus.fastModeEnabled
+    model: existing.model ?? modelStatus?.effectiveModel,
+    reasoningEffort: existing.reasoningEffort ?? modelStatus?.reasoningEffort,
+    fastModeEnabled: existing.fastModeEnabled ?? modelStatus?.fastModeEnabled
   };
 }
 

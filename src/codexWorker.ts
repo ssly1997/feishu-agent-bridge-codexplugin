@@ -400,7 +400,9 @@ async function updateCommandStatusCard(
   }
 
   try {
-    const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
+    const statusSnapshot = await resolveCommandStatusSnapshot(config, command, {
+      refreshGitBranch: phase === "done" || phase === "failed"
+    });
     await feishuClient.updateInteractiveMessage(
       config,
       command.statusMessageId,
@@ -456,7 +458,9 @@ async function notifyCommandResult(
   }
 
   const status: NotifyStatus = ackState === "done" ? "success" : "failed";
-  const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
+  const statusSnapshot = await resolveCommandStatusSnapshot(config, command, {
+    refreshGitBranch: ackState === "done" || ackState === "failed"
+  });
   const card = buildNotificationCard(
     {
       source: "codex-cli",

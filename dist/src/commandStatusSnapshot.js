@@ -1,22 +1,30 @@
 import { resolveCodexModelStatus } from "./codexModels.js";
 import { formatGitBranchValueForCwd } from "./gitStatus.js";
-export async function resolveCommandStatusSnapshot(config, command) {
+export async function resolveCommandStatusSnapshot(config, command, options = {}) {
     const existing = commandStatusSnapshotFromCommand(command);
-    if (hasCommandStatusSnapshot(command)) {
+    if (hasCommandStatusSnapshot(command) && !options.refreshGitBranch) {
         return existing;
     }
-    const gitBranch = command.sessionGitBranch
-        ?? await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
-    const modelStatus = await resolveCodexModelStatus({
-        sessionModel: command.model,
-        bridgeModel: config.codex.model,
-        codexCommand: config.codex.command
-    });
+    const gitBranch = options.refreshGitBranch
+        ? await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd)
+        : existing.gitBranch
+            ?? command.sessionGitBranch
+            ?? await formatGitBranchValueForCwd(command.sessionCwd ?? config.codex.cwd);
+    const needsModelStatus = existing.model === undefined
+        || existing.reasoningEffort === undefined
+        || existing.fastModeEnabled === undefined;
+    const modelStatus = needsModelStatus
+        ? await resolveCodexModelStatus({
+            sessionModel: command.model,
+            bridgeModel: config.codex.model,
+            codexCommand: config.codex.command
+        })
+        : undefined;
     return {
         gitBranch,
-        model: modelStatus.effectiveModel,
-        reasoningEffort: modelStatus.reasoningEffort,
-        fastModeEnabled: modelStatus.fastModeEnabled
+        model: existing.model ?? modelStatus?.effectiveModel,
+        reasoningEffort: existing.reasoningEffort ?? modelStatus?.reasoningEffort,
+        fastModeEnabled: existing.fastModeEnabled ?? modelStatus?.fastModeEnabled
     };
 }
 export function commandStatusSnapshotPatch(snapshot) {

@@ -232,7 +232,9 @@ async function updateCommandStatusCard(config, queuePath, command, phase, status
         return { command: updated ?? command, notification: "skipped" };
     }
     try {
-        const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
+        const statusSnapshot = await resolveCommandStatusSnapshot(config, command, {
+            refreshGitBranch: phase === "done" || phase === "failed"
+        });
         await feishuClient.updateInteractiveMessage(config, command.statusMessageId, buildCommandStatusCard(command, config, {
             phase,
             nowMs: options.nowMs,
@@ -275,7 +277,9 @@ async function notifyCommandResult(config, command, ackState, title, summary, co
         return { notification: "skipped" };
     }
     const status = ackState === "done" ? "success" : "failed";
-    const statusSnapshot = await resolveCommandStatusSnapshot(config, command);
+    const statusSnapshot = await resolveCommandStatusSnapshot(config, command, {
+        refreshGitBranch: ackState === "done" || ackState === "failed"
+    });
     const card = buildNotificationCard({
         source: "codex-cli",
         title,

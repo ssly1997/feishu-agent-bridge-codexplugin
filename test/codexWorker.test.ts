@@ -264,8 +264,11 @@ writeFileSync(outputPath, "全部完成");
     assert.match(cards, /快速模式：/);
     assert.match(cards, /Working directory/);
     assert.match(cards, /Git branch/);
-    assert.match(cards, /feature\/progress-card/);
-    assert.doesNotMatch(cards, /feature\/progress-card-drift/);
+    const progressCards = client.updated.slice(0, -1).map((item) => JSON.stringify(item.card)).join("\n");
+    const finalCard = JSON.stringify(client.updated.at(-1)?.card);
+    assert.match(progressCards, /feature\/progress-card/);
+    assert.doesNotMatch(progressCards, /feature\/progress-card-drift/);
+    assert.match(finalCard, /feature\/progress-card-drift/);
     assert.doesNotMatch(cards, /有效仓库/);
     assert.doesNotMatch(cards, /secret/);
   } finally {
