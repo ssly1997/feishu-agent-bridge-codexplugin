@@ -1299,7 +1299,7 @@ const sql = "insert into threads values ('session_fresh', '新会话', " +
   ", 'codex', 3000, 3000, 0, 'gpt-5', 'main', '', '" + prompt.replaceAll("'", "''") + "');";
 execFileSync("sqlite3", [${JSON.stringify(dbPath)}, sql]);
 writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify({ args, cwd: process.cwd(), prompt }));
-writeFileSync(outputPath, "新会话已创建");
+writeFileSync(outputPath, "# 新会话已创建\\n- 初始化完成");
 `,
       "utf8"
     );
@@ -1341,11 +1341,22 @@ writeFileSync(outputPath, "新会话已创建");
     const binding = await getChatSessionBinding(queuePath, "oc_test");
     assert.equal(binding?.sessionId, "session_fresh");
     assert.equal(binding?.projectId, project.id);
-    assert.equal(client.texts.length, 2);
-    assert.match(client.texts[0].text, /正在当前 project 下创建/);
-    assert.match(client.texts[1].text, /已在当前 project 下创建并绑定新的 active session/);
-    assert.match(client.texts[1].text, /session_fresh/);
-    assert.match(client.texts[1].text, /新会话已创建/);
+    assert.equal(client.texts.length, 0);
+    assert.equal(client.cards.length, 1);
+    assert.ok(client.updatedCards.length >= 1);
+    const initialCardText = JSON.stringify(client.cards[0].card);
+    assert.match(initialCardText, /Codex session creating/);
+    assert.match(initialCardText, /已耗时/);
+    assert.match(initialCardText, /已交接给 Codex CLI 处理/);
+    const finalCardText = JSON.stringify(client.updatedCards.at(-1)?.card);
+    assert.match(finalCardText, /Codex session ready/);
+    assert.match(finalCardText, /总耗时/);
+    assert.match(finalCardText, /Active session/);
+    assert.match(finalCardText, /新会话/);
+    assert.match(finalCardText, /输出摘要/);
+    assert.match(finalCardText, /```/);
+    assert.match(finalCardText, /新会话已创建/);
+    assert.doesNotMatch(finalCardText, /已介入 Codex 会话/);
     const recorded = JSON.parse(await readFile(argsPath, "utf8"));
     assert.equal(recorded.cwd, await realpath(projectRoot));
     assert.equal(recorded.prompt, "先了解当前项目");
@@ -1423,7 +1434,7 @@ writeFileSync(outputPath, "初始化完成");
         command: scriptPath,
         stateDbPath: dbPath,
         outputDir: join(dir, "codex-output"),
-        timeoutMs: 5000
+        timeoutMs: 30000
       }
     };
     await writeFile(configPath, JSON.stringify(config), "utf8");
@@ -1443,7 +1454,7 @@ writeFileSync(outputPath, "初始化完成");
 
     let binding = await getChatSessionBinding(queuePath, "oc_test");
     for (let attempt = 0; attempt < 200; attempt += 1) {
-      if (binding?.sessionId === "session_fresh" && client.texts.length >= 2) {
+      if (binding?.sessionId === "session_fresh" && client.updatedCards.length >= 1) {
         break;
       }
       await delay(50);
@@ -1451,16 +1462,28 @@ writeFileSync(outputPath, "初始化完成");
     }
     assert.equal(binding?.sessionId, "session_fresh");
     assert.equal(binding?.sessionTitle, "继续优化插件");
-    assert.equal(client.texts.length, 2);
-    assert.match(client.texts[1].text, /已在当前 project 下创建并绑定新的 active session/);
-    assert.match(client.texts[1].text, /初始化指令仍在执行/);
-    assert.doesNotMatch(client.texts[1].text, /请不要调用任何飞书发送工具/);
+    assert.equal(client.texts.length, 0);
+    assert.equal(client.cards.length, 1);
+    assert.ok(client.updatedCards.length >= 1);
+    const creatingCardText = JSON.stringify(client.cards[0].card);
+    const boundCardText = JSON.stringify(client.updatedCards.at(-1)?.card);
+    assert.match(creatingCardText, /Codex session creating/);
+    assert.match(boundCardText, /Codex session initializing/);
+    assert.match(boundCardText, /已耗时/);
+    assert.match(boundCardText, /初始化指令.*仍在执行/);
+    assert.doesNotMatch(boundCardText, /已介入 Codex 会话/);
+    assert.doesNotMatch(boundCardText, /请不要调用任何飞书发送工具/);
 
     await writeFile(releasePath, "done", "utf8");
     await handling;
 
-    assert.equal(client.texts.length, 3);
-    assert.match(client.texts[2].text, /新会话初始化指令已完成/);
+    assert.equal(client.texts.length, 0);
+    assert.ok(client.updatedCards.length >= 2);
+    const finishedCardText = JSON.stringify(client.updatedCards.at(-1)?.card);
+    assert.match(finishedCardText, /Codex session ready/);
+    assert.match(finishedCardText, /总耗时/);
+    assert.match(finishedCardText, /初始化完成/);
+    assert.match(finishedCardText, /输出摘要/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

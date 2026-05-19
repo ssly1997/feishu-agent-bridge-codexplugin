@@ -26,6 +26,7 @@ import {
   type CommandQueueStats,
   type SessionCommandStats
 } from "./commandQueue.js";
+import { buildNotificationCard } from "./card.js";
 import {
   findCodexSession,
   findCodexProject,
@@ -39,7 +40,7 @@ import {
 import { readCodexMcpList } from "./codexMcp.js";
 import { resolveCodexModelStatus } from "./codexModels.js";
 import { runCodexNewSession } from "./codexCli.js";
-import type { CodexResumeResult } from "./codexCli.js";
+import type { CodexProgressEvent, CodexResumeResult } from "./codexCli.js";
 import { FeishuClient } from "./feishuClient.js";
 import {
   formatGitBranchLine,
@@ -60,7 +61,7 @@ import {
 import { buildCommandStatusCard } from "./statusCard.js";
 import { readStandaloneListenerRuntimeStatus } from "./listenerRuntime.js";
 import type { CodexSession } from "./codexSessions.js";
-import type { AgentCommand, AgentCommandAttachment, BridgeConfig, NewAgentCommand } from "./types.js";
+import type { AgentCommand, AgentCommandAttachment, BridgeConfig, NewAgentCommand, NotifyStatus } from "./types.js";
 
 const IMAGE_CANDIDATE_TTL_MS = 5 * 60 * 1000;
 const IMAGE_CANDIDATE_MAX_PER_SENDER = 5;
@@ -68,8 +69,10 @@ const DEFAULT_IMAGE_TASK_TEXT = "请识别并分析这张图片。";
 const SESSION_PAGE_SIZE = 10;
 const NEW_SESSION_DISCOVERY_RETRIES = 12;
 const NEW_SESSION_DISCOVERY_INTERVAL_MS = 250;
+const NEW_SESSION_PROGRESS_UPDATE_INTERVAL_MS = 10_000;
 const DEFAULT_NEW_SESSION_PROMPT = "新会话初始化";
 const STATUS_RECENT_COMMAND_LIMIT = 10;
+const INITIAL_NEW_SESSION_CLI_HANDOFF_PROGRESS_SUMMARY = "已交接给 Codex CLI 处理，正在创建新的 Codex session。";
 
 export type MessageReceiveEvent = Parameters<
   NonNullable<EventHandles["im.message.receive_v1"]>
@@ -133,6 +136,23 @@ interface WorkStatusContext {
   runningCommand?: AgentCommand;
   nowMs: number;
   currentSessionActive: boolean;
+}
+
+type NewSessionStatusPhase = "creating" | "bound" | "done" | "failed";
+
+interface NewSessionStatusDetails {
+  phase: NewSessionStatusPhase;
+  projectRootPath: string;
+  startedAtMs: number;
+  nowMs?: number;
+  projectLabel?: string;
+  prompt?: string;
+  session?: CodexSession;
+  bindingSummary?: string;
+  result?: CodexResumeResult;
+  error?: unknown;
+  progressSummary?: string;
+  nextSteps?: string[];
 }
 
 export class FeishuCommandListener {
@@ -1229,17 +1249,98 @@ export class FeishuCommandListener {
     });
     const beforeIds = new Set(beforeSessions.map((session) => session.id));
     const startedAtSeconds = Math.floor(Date.now() / 1000) - 2;
-    await feishuClient.sendTextMessage(
+    const newSessionStartedAtMs = Date.now();
+    const promptText = prompt?.trim() || DEFAULT_NEW_SESSION_PROMPT;
+    const progressSummaries: string[] = [INITIAL_NEW_SESSION_CLI_HANDOFF_PROGRESS_SUMMARY];
+    let activeProgressSummary = formatNewSessionProgressSummary(progressSummaries);
+    let progressSession: CodexSession | undefined;
+    let progressBindingSummary: string | undefined;
+    let progressPhase: NewSessionStatusPhase = "creating";
+    let statusCardMessageId = await this.publishNewSessionStatusCard(
       config,
+      feishuClient,
       {
-        receiveIdType: "chat_id",
-        receiveId: chat.chatId
+        chatId: chat.chatId,
+        messageId: undefined,
+        fallbackTextOnError: true
       },
-      [
-        "正在当前 project 下创建新的 Codex 会话。",
-        binding.projectDisplayLabel ? `project: ${binding.projectDisplayLabel}` : undefined
-      ].filter((line): line is string => line !== undefined).join("\n")
+      {
+        phase: "creating",
+        projectRootPath,
+        startedAtMs: newSessionStartedAtMs,
+        nowMs: newSessionStartedAtMs,
+        projectLabel: binding.projectDisplayLabel,
+        prompt: promptText,
+        progressSummary: activeProgressSummary
+      }
     );
+    let lastProgressUpdatedAt = newSessionStartedAtMs;
+    let progressUpdateChain: Promise<void> = Promise.resolve();
+    let progressHeartbeat: NodeJS.Timeout | undefined;
+    const enqueueStatusCardRefresh = (
+      nowMs: number,
+      options: { allowSameSummary?: boolean } = {}
+    ): void => {
+      const nextSummary = formatNewSessionProgressSummary(progressSummaries);
+      if (!options.allowSameSummary && nextSummary === activeProgressSummary) {
+        return;
+      }
+      if (nowMs - lastProgressUpdatedAt < NEW_SESSION_PROGRESS_UPDATE_INTERVAL_MS) {
+        return;
+      }
+
+      activeProgressSummary = nextSummary;
+      lastProgressUpdatedAt = nowMs;
+      progressUpdateChain = progressUpdateChain
+        .catch(() => undefined)
+        .then(async () => {
+          statusCardMessageId = await this.publishNewSessionStatusCard(
+            config,
+            feishuClient,
+            {
+              chatId: chat.chatId,
+              messageId: statusCardMessageId,
+              fallbackTextOnError: false
+            },
+            {
+              phase: progressPhase,
+              projectRootPath,
+              startedAtMs: newSessionStartedAtMs,
+              nowMs,
+              projectLabel: binding.projectDisplayLabel,
+              prompt: promptText,
+              session: progressSession,
+              bindingSummary: progressBindingSummary,
+              progressSummary: activeProgressSummary
+            }
+          );
+        })
+        .catch(() => {
+          // Progress updates must never interrupt new-session creation.
+        });
+    };
+    const enqueueProgressUpdate = (event: CodexProgressEvent): void => {
+      const progressSummary = event.summary.replace(/\s+/g, " ").trim();
+      if (!progressSummary) return;
+      if (progressSummaries[progressSummaries.length - 1] !== progressSummary) {
+        progressSummaries.push(progressSummary);
+        if (progressSummaries.length > 4) {
+          progressSummaries.splice(0, progressSummaries.length - 4);
+        }
+      }
+      enqueueStatusCardRefresh(event.receivedAtMs);
+    };
+    const stopProgressUpdates = async (): Promise<void> => {
+      if (progressHeartbeat) {
+        clearInterval(progressHeartbeat);
+        progressHeartbeat = undefined;
+      }
+      await progressUpdateChain.catch(() => undefined);
+    };
+    progressHeartbeat = setInterval(() => {
+      enqueueStatusCardRefresh(Date.now(), { allowSameSummary: true });
+    }, NEW_SESSION_PROGRESS_UPDATE_INTERVAL_MS);
+    progressHeartbeat.unref?.();
 
     const outputPath = join(
       config.codex.outputDir ?? join(CONFIG_DIR, "codex-output"),
@@ -1250,9 +1351,10 @@ export class FeishuCommandListener {
       result?: CodexResumeResult;
       error?: unknown;
     } = { done: false };
-    const runResultPromise = runCodexNewSession(prompt?.trim() || DEFAULT_NEW_SESSION_PROMPT, config.codex, {
+    const runResultPromise = runCodexNewSession(promptText, config.codex, {
       cwd: projectRootPath,
-      outputPath
+      outputPath,
+      onProgress: enqueueProgressUpdate
     }).then((result) => {
       runState.done = true;
       runState.result = result;
@@ -1270,6 +1372,8 @@ export class FeishuCommandListener {
     );
     if (!session) {
       const result = await runResultPromise;
+      activeProgressSummary = formatNewSessionProgressSummary(progressSummaries);
+      await stopProgressUpdates();
       session = await this.findCreatedProjectSession(
         config,
         binding.projectId,
@@ -1277,58 +1381,101 @@ export class FeishuCommandListener {
         startedAtSeconds
       );
       if (session) {
-        await this.sendNewSessionCreatedMessage(
+        await progressUpdateChain.catch(() => undefined);
+        const created = await this.sendNewSessionCreatedMessage(
           config,
           queuePath,
           chat,
           session,
           feishuClient,
-          runState
+          runState,
+          {
+            messageId: statusCardMessageId,
+            projectRootPath,
+            startedAtMs: newSessionStartedAtMs,
+            projectLabel: binding.projectDisplayLabel,
+            prompt: promptText,
+            progressSummary: activeProgressSummary
+          }
         );
+        statusCardMessageId = created.messageId;
         return;
       }
-      await feishuClient.sendTextMessage(
+      await progressUpdateChain.catch(() => undefined);
+      statusCardMessageId = await this.publishNewSessionStatusCard(
         config,
+        feishuClient,
         {
-          receiveIdType: "chat_id",
-          receiveId: chat.chatId
+          chatId: chat.chatId,
+          messageId: statusCardMessageId,
+          fallbackTextOnError: true
         },
-        [
-          runState.error
-            ? "Codex CLI 创建新会话失败。"
-            : result?.ok
-              ? "Codex CLI 已返回，但暂未在本地 state DB 中识别到新会话。"
-              : "Codex CLI 创建新会话失败。",
-          result ? summarizeCodexNewSessionResult(result) : formatError(runState.error),
-          "",
-          "请稍后发送 list-session 查看是否已落盘，或重试 new-session。"
-        ].filter((line): line is string => Boolean(line)).join("\n")
+        {
+          phase: "failed",
+          projectRootPath,
+          startedAtMs: newSessionStartedAtMs,
+          projectLabel: binding.projectDisplayLabel,
+          prompt: promptText,
+          result,
+          error: runState.error,
+          progressSummary: activeProgressSummary,
+          nextSteps: ["请稍后发送 list-session 查看是否已落盘，或重试 new-session。"]
+        }
       );
       return;
     }
 
-    const creationMessageIncludedRunResult = await this.sendNewSessionCreatedMessage(
+    activeProgressSummary = formatNewSessionProgressSummary(progressSummaries);
+    progressSession = session;
+    progressPhase = runState.done ? "done" : "bound";
+    if (runState.done) {
+      await stopProgressUpdates();
+    } else {
+      await progressUpdateChain.catch(() => undefined);
+    }
+    const created = await this.sendNewSessionCreatedMessage(
       config,
       queuePath,
       chat,
       session,
       feishuClient,
-      runState
+      runState,
+      {
+        messageId: statusCardMessageId,
+        projectRootPath,
+        startedAtMs: newSessionStartedAtMs,
+        projectLabel: binding.projectDisplayLabel,
+        prompt: promptText,
+        progressSummary: activeProgressSummary
+      }
     );
-    if (!creationMessageIncludedRunResult) {
+    statusCardMessageId = created.messageId;
+    progressBindingSummary = created.bindingSummary;
+    progressPhase = created.includesRunResult ? "done" : "bound";
+    if (!created.includesRunResult) {
       const result = await runResultPromise;
-      await feishuClient.sendTextMessage(
+      activeProgressSummary = formatNewSessionProgressSummary(progressSummaries);
+      await stopProgressUpdates();
+      await this.publishNewSessionStatusCard(
         config,
+        feishuClient,
         {
-          receiveIdType: "chat_id",
-          receiveId: chat.chatId
+          chatId: chat.chatId,
+          messageId: statusCardMessageId,
+          fallbackTextOnError: true
         },
-        [
-          result?.ok
-            ? "新会话初始化指令已完成。"
-            : "新会话已创建并绑定，但初始化指令执行未正常完成。",
-          result ? summarizeCodexNewSessionResult(result) : formatError(runState.error)
-        ].filter((line): line is string => Boolean(line)).join("\n")
+        {
+          phase: result?.ok ? "done" : "failed",
+          projectRootPath,
+          startedAtMs: newSessionStartedAtMs,
+          projectLabel: binding.projectDisplayLabel,
+          prompt: promptText,
+          session,
+          bindingSummary: progressBindingSummary,
+          result,
+          error: runState.error,
+          progressSummary: activeProgressSummary
+        }
       );
     }
   }
@@ -1343,31 +1490,121 @@ export class FeishuCommandListener {
       done: boolean;
       result?: CodexResumeResult;
       error?: unknown;
+    },
+    card: {
+      messageId?: string;
+      projectRootPath: string;
+      startedAtMs: number;
+      projectLabel?: string;
+      prompt: string;
+      progressSummary?: string;
     }
-  ): Promise<boolean> {
-    const summary = await this.bindChatToSession(config, queuePath, chat, session, feishuClient);
+  ): Promise<{ includesRunResult: boolean; messageId?: string; bindingSummary: string }> {
+    await this.bindChatToSession(config, queuePath, chat, session, feishuClient);
+    const summary = formatNewSessionBindingResult(session);
     const includesRunResult = runState.done;
-    await feishuClient.sendTextMessage(
+    const messageId = await this.publishNewSessionStatusCard(
       config,
+      feishuClient,
       {
-        receiveIdType: "chat_id",
-        receiveId: chat.chatId
+        chatId: chat.chatId,
+        messageId: card.messageId,
+        fallbackTextOnError: true
       },
-      [
-        "已在当前 project 下创建并绑定新的 active session。",
-        "",
-        summary,
-        !includesRunResult ? "" : undefined,
-        !includesRunResult ? "初始化指令仍在执行，完成后会再同步结果。" : undefined,
-        includesRunResult && runState.result ? "" : undefined,
-        includesRunResult && runState.result ? summarizeCodexNewSessionResult(runState.result) : undefined,
-        includesRunResult && runState.error ? "" : undefined,
-        includesRunResult && runState.error
-          ? `Codex CLI 已创建会话，但初始化指令返回异常：${formatError(runState.error)}`
-          : undefined
-      ].filter((line): line is string => line !== undefined).join("\n")
+      {
+        phase: includesRunResult
+          ? runState.result?.ok ? "done" : "failed"
+        : "bound",
+        projectRootPath: card.projectRootPath,
+        startedAtMs: card.startedAtMs,
+        projectLabel: card.projectLabel,
+        prompt: card.prompt,
+        session,
+        bindingSummary: summary,
+        result: runState.result,
+        error: runState.error,
+        progressSummary: card.progressSummary
+      }
     );
-    return includesRunResult;
+    return {
+      includesRunResult,
+      messageId,
+      bindingSummary: summary
+    };
+  }
+
+  private async publishNewSessionStatusCard(
+    config: BridgeConfig,
+    feishuClient: FeishuClient,
+    target: {
+      chatId: string;
+      messageId?: string;
+      fallbackTextOnError: boolean;
+    },
+    details: NewSessionStatusDetails
+  ): Promise<string | undefined> {
+    const card = await this.buildNewSessionStatusCard(config, details);
+    try {
+      if (target.messageId) {
+        const result = await feishuClient.updateInteractiveMessage(config, target.messageId, card);
+        return result.messageId ?? target.messageId;
+      }
+      const result = await feishuClient.sendInteractiveMessageToReceiver(
+        config,
+        {
+          receiveIdType: "chat_id",
+          receiveId: target.chatId
+        },
+        card
+      );
+      return result.messageId;
+    } catch (error) {
+      stderrLogger.warn(
+        "[inbound]",
+        "failed to publish new-session status card",
+        JSON.stringify({
+          chatId: target.chatId,
+          phase: details.phase,
+          hasMessageId: Boolean(target.messageId),
+          error: formatError(error)
+        })
+      );
+      if (target.fallbackTextOnError) {
+        await feishuClient.sendTextMessage(
+          config,
+          {
+            receiveIdType: "chat_id",
+            receiveId: target.chatId
+          },
+          buildNewSessionFallbackText(details)
+        );
+      }
+      return target.messageId;
+    }
+  }
+
+  private async buildNewSessionStatusCard(
+    config: BridgeConfig,
+    details: NewSessionStatusDetails
+  ): Promise<ReturnType<typeof buildNotificationCard>> {
+    const gitBranch = details.session?.gitBranch ?? await formatGitBranchValueForCwd(details.projectRootPath);
+    return buildNotificationCard(
+      {
+        source: "codex-cli",
+        title: newSessionStatusTitle(details),
+        status: newSessionNotifyStatus(details),
+        summary: buildNewSessionStatusSummary(details),
+        cwd: details.projectRootPath,
+        gitBranch,
+        projectLabel: details.projectLabel,
+        codexSessionId: details.session?.id,
+        codexSessionTitle: details.session?.title,
+        codexSessionLabel: details.session ? undefined : "creating...",
+        nextSteps: details.nextSteps
+      },
+      config,
+      { useConfiguredCodexSession: false }
+    );
   }
 
   private async findCreatedProjectSession(
@@ -2181,6 +2418,162 @@ function truncateMiddle(value: string, maxLength: number): string {
 
 function yesNo(value: boolean): string {
   return value ? "yes" : "no";
+}
+
+function newSessionStatusTitle(details: NewSessionStatusDetails): string {
+  switch (details.phase) {
+    case "creating":
+      return "Codex session creating";
+    case "bound":
+      return "Codex session initializing";
+    case "done":
+      return "Codex session ready";
+    case "failed":
+      return details.session || details.result?.ok
+        ? "Codex session needs attention"
+        : "Codex session failed";
+  }
+}
+
+function newSessionNotifyStatus(details: NewSessionStatusDetails): NotifyStatus {
+  switch (details.phase) {
+    case "creating":
+    case "bound":
+      return "in_progress";
+    case "done":
+      return "success";
+    case "failed":
+      return details.session || details.result?.ok ? "needs_action" : "failed";
+  }
+}
+
+function buildNewSessionStatusSummary(details: NewSessionStatusDetails): string {
+  const elapsedLine = formatNewSessionElapsedLine(details);
+  const lines = [
+    `创建状态：${newSessionPhaseLabel(details)}`,
+    elapsedLine,
+    `指令摘要：${formatNewSessionCommandSummary(details.prompt)}`,
+    details.session
+      ? `Active session：${details.session.title || "(untitled)"} (${shortId(details.session.id)})`
+      : undefined
+  ].filter((line): line is string => Boolean(line));
+
+  if (details.phase === "creating") {
+    lines.push("创建进展：正在等待 Codex CLI 建立会话并写入本地 state DB。");
+  }
+  if (details.phase === "bound") {
+    lines.push("初始化指令：仍在执行，完成后会继续更新本卡片。");
+  }
+  if (details.bindingSummary) {
+    lines.push(`绑定结果：\n${details.bindingSummary}`);
+  }
+  if (details.result) {
+    lines.push(`初始化结果：\n${formatNewSessionResultForCard(details.result)}`);
+  } else if (details.error) {
+    lines.push(`异常信息：${truncateMultiline(formatError(details.error), 900)}`);
+  }
+  if (details.phase === "failed" && !details.session && details.result?.ok) {
+    lines.push("识别结果：Codex CLI 已返回成功，但暂未在本地 state DB 中识别到新会话。");
+  }
+  if (details.phase === "failed" && !details.session && !details.result?.ok && !details.error) {
+    lines.push("失败原因：Codex CLI 未正常完成，且未返回可用错误信息。");
+  }
+  if (details.progressSummary) {
+    lines.push(`最近进展：\n${truncateMultiline(details.progressSummary, 900)}`);
+  }
+  return lines.join("\n");
+}
+
+function formatNewSessionElapsedLine(details: NewSessionStatusDetails): string {
+  const nowMs = details.nowMs ?? Date.now();
+  const elapsed = formatDuration(nowMs - details.startedAtMs);
+  if (details.phase === "done" || details.phase === "failed") {
+    return `总耗时：${elapsed}`;
+  }
+  return `已耗时：${elapsed}`;
+}
+
+function buildNewSessionFallbackText(details: NewSessionStatusDetails): string {
+  return [
+    newSessionStatusTitle(details),
+    "",
+    buildNewSessionStatusSummary(details),
+    details.nextSteps?.length ? "" : undefined,
+    ...(details.nextSteps ?? []).map((item) => `下一步：${item}`)
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function newSessionPhaseLabel(details: NewSessionStatusDetails): string {
+  switch (details.phase) {
+    case "creating":
+      return "创建中";
+    case "bound":
+      return "已创建 / 初始化中";
+    case "done":
+      return "完成";
+    case "failed":
+      if (details.session || details.result?.ok) return "需要确认";
+      return "失败";
+  }
+}
+
+function formatNewSessionCommandSummary(prompt: string | undefined): string {
+  const normalizedPrompt = (prompt ?? "").trim();
+  if (!normalizedPrompt || normalizedPrompt === DEFAULT_NEW_SESSION_PROMPT) return "new-session";
+  return `new-session ${truncateSingleLine(normalizedPrompt, 160)}`;
+}
+
+function formatNewSessionProgressSummary(values: string[]): string | undefined {
+  const items = values
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (items.length === 0) return undefined;
+  return items.map((item) => `- ${truncateSingleLine(item, 220)}`).join("\n");
+}
+
+function formatNewSessionBindingResult(session: CodexSession): string {
+  return [
+    "- 已绑定为当前群 active session",
+    session.projectDisplayLabel ? `- Project：${truncateSingleLine(session.projectDisplayLabel, 120)}` : undefined,
+    `- Session：${truncateSingleLine(session.title || "(untitled)", 120)} (${shortId(session.id)})`,
+    `- Cwd：${truncateSingleLine(session.cwd, 180)}`
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function formatNewSessionResultForCard(result: CodexResumeResult): string {
+  const body = (result.lastMessage || result.stdout || result.stderr).trim();
+  const status = result.ok
+    ? `Codex CLI 已完成，用时 ${formatDuration(result.durationMs)}。`
+    : result.timedOut
+      ? `Codex CLI 超时，用时 ${formatDuration(result.durationMs)}。`
+      : `Codex CLI 退出码 ${result.exitCode ?? "null"}${result.signal ? `，signal=${result.signal}` : ""}。`;
+  const bodySummary = formatNewSessionResultBody(body);
+  return bodySummary ? `${status}\n输出摘要：\n${bodySummary}` : status;
+}
+
+function formatNewSessionResultBody(value: string): string | undefined {
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return undefined;
+  const selected = lines.slice(0, 6);
+  if (lines.length > selected.length) {
+    selected.push("...");
+  }
+  const body = truncateMultiline(selected.join("\n"), 700)
+    .replaceAll("```", "'''");
+  return ["```", body, "```"].join("\n");
+}
+
+function truncateMultiline(value: string, maxLength: number): string {
+  const normalized = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .join("\n")
+    .trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
 export function extractCommandFromMessage(
