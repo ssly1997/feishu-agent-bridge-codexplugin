@@ -11,9 +11,9 @@ import {
 } from "../src/codexMcp.js";
 
 const MCP_LIST_OUTPUT = `Name                 Command                                                                                                       Args                                                                                          Env                                                     Cwd                                                                            Status    Auth       
-computer-use         ./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient  mcp                                                                                           -                                                       /Users/lifangchang/.codex/plugins/cache/openai-bundled/computer-use/1.0.793/.  enabled   Unsupported
-figma                /Users/lifangchang/.nvm/versions/node/v22.22.0/bin/npx                                                        -y figma-developer-mcp --figma-api-key=figd_secret123 --stdio                                  -                                                       -                                                                              enabled   Unsupported
-live-socket          /Users/lifangchang/KwaiCode/live-agentprobe-mcp/.build/debug/live-agentprobe-mcp                              -                                                                                             AGENT_PROBE_BASE_URL=abc, LIVE_SOCKET_MCP_HOME=/tmp     -                                                                              disabled  Unsupported
+computer-use         ./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient  mcp                                                                                           -                                                       /Users/example/.codex/plugins/cache/openai-bundled/computer-use/1.0.793/.     enabled   Unsupported
+figma                /Users/example/.nvm/versions/node/v22.22.0/bin/npx                                                            -y figma-developer-mcp --figma-api-key=figd_example123 --stdio                                 -                                                       -                                                                              enabled   Unsupported
+live-socket          /Users/example/projects/live-agentprobe-mcp/.build/debug/live-agentprobe-mcp                                  -                                                                                             AGENT_PROBE_BASE_URL=abc, LIVE_SOCKET_MCP_HOME=/tmp     -                                                                              disabled  Unsupported
 
 Name         Url                         Bearer Token Env Var  Status   Auth       
 viewinspect  http://127.0.0.1:47199/mcp  -                     enabled  Unsupported
@@ -29,7 +29,7 @@ test("parseCodexMcpListOutput parses stdio and http MCP tables", () => {
     command: "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
     args: "mcp",
     env: undefined,
-    cwd: "/Users/lifangchang/.codex/plugins/cache/openai-bundled/computer-use/1.0.793/.",
+    cwd: "/Users/example/.codex/plugins/cache/openai-bundled/computer-use/1.0.793/.",
     status: "enabled",
     auth: "Unsupported"
   });

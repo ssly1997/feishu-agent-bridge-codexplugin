@@ -378,7 +378,7 @@ test("buildCodexMcpListCard renders MCP servers with colored state badges", () =
         auth: "Unsupported",
         command: "node",
         args: "./scripts/codex-plugin-mcp.mjs",
-        cwd: "/Users/lifangchang/.codex/plugins/cache/local/feishu-agent-bridge/0.1.2/."
+        cwd: "/Users/example/.codex/plugins/cache/local/feishu-agent-bridge/0.1.2/."
       },
       {
         name: "viewinspect",
