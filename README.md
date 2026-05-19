@@ -78,75 +78,23 @@ Feishu status card update / final result
 
 适合任意 MCP 客户端、脚本或 CI，只使用 `feishu_notify` / `feishu_send_test` 等出站工具。
 
-1. 在飞书开发者后台创建企业自建应用，开启机器人，并开通 `im:message:send_as_bot`。
-2. 把机器人加入目标群，拿到目标群的 `chat_id`。
-3. clone、安装依赖并构建：
-
-```bash
-git clone https://github.com/ssly1997/feishu-agent-bridge-codexplugin.git
-cd feishu-agent-bridge-codexplugin
-corepack pnpm install
-corepack pnpm build
-```
-
-4. 创建最小本机配置：
-
-```bash
-mkdir -p ~/.feishu-agent-bridge
-cat > ~/.feishu-agent-bridge/config.json <<'JSON'
-{
-  "appId": "cli_xxxxxxxxxxxxxxxx",
-  "appSecret": "your-app-secret",
-  "receiveIdType": "chat_id",
-  "receiveId": "oc_xxxxxxxxxxxxxxxx",
-  "enabled": true
-}
-JSON
-```
-
-5. 让 MCP 客户端指向 `dist/src/index.js`，然后调用 `feishu_send_test`。如果测试消息到达飞书，出站通知链路就已经可用。
+1. 完成“安装与构建”。
+2. 在飞书开发者后台创建自建应用、开启机器人、开通 `im:message:send_as_bot`，并把机器人加入目标群。
+3. 按“本机配置”写入只发通知的最小 `config.json`。
+4. 按“通用 MCP 客户端配置”让客户端指向 `dist/src/index.js`。
+5. 调用 `feishu_send_test`。如果测试消息到达飞书，出站通知链路就已经可用。
 
 ### 路径 B：作为 Codex 插件使用
 
 适合希望在 Codex 里直接看到 Feishu Agent Bridge tools 的用户。
 
-开源仓库推荐从 Codex GUI 添加：
-
-1. 打开 Codex 的插件页，点击添加插件市场。
-2. 来源填写 GitHub 仓库，例如 `https://github.com/ssly1997/feishu-agent-bridge-codexplugin`，也可以填 `ssly1997/feishu-agent-bridge-codexplugin` 或 `git@github.com:ssly1997/feishu-agent-bridge-codexplugin.git`。
-3. Git 引用填写 `main`，或填写你要测试的 tag / branch。
-4. 稀疏路径留空。本仓库的 marketplace 清单在仓库根目录的 `.agents/plugins/marketplace.json`，插件根也在仓库根目录。输入框里的 `plugins/codex` 是占位示例，不要填进去；只有 marketplace 位于 monorepo 子目录时才需要填写稀疏路径。
-5. 添加市场后，安装或启用 `Feishu Agent Bridge`，然后重启 Codex 或刷新插件列表。
-
-本地开发时也可以用命令行安装：
-
-```bash
-corepack pnpm install
-corepack pnpm build
-corepack pnpm codex:plugin:install
-```
-
-安装后重启 Codex，或在 Codex 里刷新插件列表。先用 `feishu_status` 和 `feishu_send_test` 验证出站链路，再继续配置入站指令。
+开源用户优先按“Codex 插件安装 -> 从 Codex GUI 安装”添加 GitHub marketplace；本地开发者按“Codex 插件安装 -> 本地开发命令行安装”把当前 checkout 装成本地 marketplace。安装后先按“验证”跑通出站链路，再继续配置入站指令。
 
 ### 路径 C：从飞书群驱动 Codex session
 
 适合希望在飞书群里 `@机器人 list-project`、绑定 project/session，并让普通自然语言指令进入 Codex CLI 的用户。
 
-在路径 A 或 B 的基础上继续完成：
-
-1. 在 `~/.feishu-agent-bridge/config.json` 中设置 `inbound.enabled=true` 和 `codex.enabled=true`。
-2. 配置 `botOpenId`，并按需配置 `allowedOpenIds` 限制可发指令的人。
-3. 在飞书开发者后台开启长连接消息事件 `im.message.receive_v1`。
-4. 如果要使用卡片按钮，继续开启长连接卡片回调 `card.action.trigger`。
-5. 启动 runtime：
-
-```bash
-corepack pnpm runtime:restart
-corepack pnpm runtime:status
-tail -200 ~/.feishu-agent-bridge/runtime.log
-```
-
-6. 在飞书群里依次发送：
+在路径 A 或 B 的基础上，继续按“本机配置”开启 `inbound.enabled=true` 和 `codex.enabled=true`，按“飞书开发者后台配置”开启 `im.message.receive_v1` 和 `card.action.trigger`，再按“Runtime 使用”启动 `fab-runtime`。飞书群内最小验证顺序：
 
 ```text
 @机器人 list-project
@@ -155,7 +103,7 @@ tail -200 ~/.feishu-agent-bridge/runtime.log
 @机器人 继续完成当前任务
 ```
 
-`ws client ready` 只说明本机长连接已连上飞书网关；真正收到群消息时，`runtime.log` 里应出现 `[inbound] received message`。
+`ws client ready` 只说明本机长连接已连上飞书网关；真正收到群消息时，`~/.feishu-agent-bridge/runtime.log` 里应出现 `[inbound] received message`。
 
 ## 安装与构建
 
@@ -173,11 +121,9 @@ corepack pnpm build
 corepack pnpm test
 corepack pnpm smoke
 corepack pnpm smoke:plugin
-corepack pnpm runtime:status
-corepack pnpm runtime:start
-corepack pnpm runtime:restart
-corepack pnpm runtime:stop
 ```
+
+Runtime 控制命令集中在“Runtime 使用”一节。
 
 ## Codex 插件安装
 
@@ -207,11 +153,9 @@ corepack pnpm runtime:stop
 
 ### 本地开发命令行安装
 
-开发者可以把当前 checkout 安装到本机 Codex local marketplace：
+开发者完成“安装与构建”后，可以把当前 checkout 安装到本机 Codex local marketplace：
 
 ```bash
-corepack pnpm install
-corepack pnpm build
 corepack pnpm codex:plugin:install
 ```
 
@@ -265,12 +209,35 @@ enabled = true
 
 ## 本机配置
 
-创建本机私有配置：
-
-配置里的路径字段必须写本机绝对路径；不要直接保留示例中的 `/Users/yourname`，也不要依赖 JSON 自动展开 `~` 或 `$HOME`。不想定制路径时，可以删除对应字段让程序使用默认值。
+先创建本机私有配置目录：
 
 ```bash
 mkdir -p ~/.feishu-agent-bridge
+```
+
+配置里的路径字段必须写本机绝对路径；不要直接保留示例中的 `/Users/yourname`，也不要依赖 JSON 自动展开 `~` 或 `$HOME`。不想定制路径时，可以删除对应字段让程序使用默认值。
+
+### 只发通知的最小配置
+
+只需要 `feishu_notify` / `feishu_send_test` 时，用下面这份即可：
+
+```bash
+cat > ~/.feishu-agent-bridge/config.json <<'JSON'
+{
+  "appId": "cli_xxxxxxxxxxxxxxxx",
+  "appSecret": "your-app-secret",
+  "receiveIdType": "chat_id",
+  "receiveId": "oc_xxxxxxxxxxxxxxxx",
+  "enabled": true
+}
+JSON
+```
+
+### 入站和 Codex 调度配置示例
+
+如果要从飞书群驱动 Codex session，再使用下面这份作为模板：
+
+```bash
 cat > ~/.feishu-agent-bridge/config.json <<'JSON'
 {
   "appId": "cli_xxxxxxxxxxxxxxxx",
